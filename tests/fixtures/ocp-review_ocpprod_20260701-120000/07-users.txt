@@ -1,0 +1,4 @@
+NAME           UID                                    FULL NAME       IDENTITIES
+jsmith         2a7d9f10-1234-4abc-8def-aaaaaaaaaaaa   John Smith      ldap:uid=jsmith,ou=users,dc=acme-corp,dc=com
+ocpprodadmin   3b8e0a21-5678-4bcd-9ef0-bbbbbbbbbbbb   Cluster Admin   htpasswd:ocpprodadmin
+yossic         4c9f1b32-9abc-4cde-af01-cccccccccccc   יוסי כהן        ldap:uid=yossic,ou=users,dc=acme-corp,dc=com

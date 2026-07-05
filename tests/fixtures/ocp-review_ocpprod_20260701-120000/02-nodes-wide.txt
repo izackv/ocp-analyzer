@@ -1,0 +1,3 @@
+NAME                             STATUS   ROLES                  AGE    VERSION   INTERNAL-IP    EXTERNAL-IP   OS-IMAGE
+master-0.ocpprod.acme-corp.com   Ready    control-plane,master   400d   v1.29.8   10.128.0.12    <none>        Red Hat Enterprise Linux CoreOS
+worker-1.ocpprod.acme-corp.com   Ready    worker                 400d   v1.29.8   192.168.10.5   <none>        Red Hat Enterprise Linux CoreOS

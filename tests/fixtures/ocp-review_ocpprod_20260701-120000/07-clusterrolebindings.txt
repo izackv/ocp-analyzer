@@ -1,0 +1,3 @@
+NAME                    ROLE                        AGE    USERS                 GROUPS              SERVICEACCOUNTS
+cluster-admin-binding   ClusterRole/cluster-admin   400d   rbaconly,jsmith
+self-provisioners       ClusterRole/self-provisioner400d

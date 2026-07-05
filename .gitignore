@@ -1,0 +1,27 @@
+# OS / editor noise
+.DS_Store
+Thumbs.db
+*.swp
+*~
+.idea/
+.vscode/
+
+# Python
+__pycache__/
+*.pyc
+
+# Collected cluster data — NEVER commit bundles (they contain real
+# usernames, hostnames, IPs and the full route inventory).
+# Anchored to the repo root so the synthetic fixture bundle in
+# tests/fixtures/ (fake data only) stays tracked.
+/ocp-review_*/
+/ocp-review_*.tar.gz
+/ocp-review_*.tar.gz.sha256
+/ocp-review_*.tar.gz.b64
+
+# Sanitized copies and their PRIVATE reverse maps
+*-sanitized/
+*-sanitized-map.json
+
+# Generated analysis reports
+*-analysis/

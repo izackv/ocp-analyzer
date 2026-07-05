@@ -1,0 +1,16 @@
+## whoami
+jsmith
+## server
+https://api.ocpprod.acme-corp.com:6443
+## client/server version
+Client Version: 4.16.8
+Server Version: 4.16.4
+Kubernetes Version: v1.29.8
+## can-i get nodes
+yes
+## can-i list clusteroperators
+yes
+## can-i create clusterrolebindings (MUST be 'no' for a proper read-only audit account)
+no
+## can-i get secrets -A (informational; this script never reads secret data)
+no

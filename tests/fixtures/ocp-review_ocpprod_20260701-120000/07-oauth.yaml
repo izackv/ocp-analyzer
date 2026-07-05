@@ -1,0 +1,15 @@
+apiVersion: config.openshift.io/v1
+kind: OAuth
+metadata:
+  name: cluster
+  annotations:
+    contact: john.smith@acme-corp.com
+spec:
+  identityProviders:
+  - name: acme-corp-ldap
+    mappingMethod: claim
+    type: LDAP
+    ldap:
+      bindDN: CN=svc-ocp-bind,OU=Service Accounts,DC=acme-corp,DC=com
+      insecure: true
+      url: "ldap://ldap.acme-corp.com:389/ou=users,dc=acme-corp,dc=com?uid"

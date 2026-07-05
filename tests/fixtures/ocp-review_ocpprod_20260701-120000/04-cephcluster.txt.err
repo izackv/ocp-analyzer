@@ -1,0 +1,1 @@
+Error from server (NotFound): the server doesn't have a resource type "cephcluster" (request to https://api.ocpprod.acme-corp.com:6443 by user jsmith)
