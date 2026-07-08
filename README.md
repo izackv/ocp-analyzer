@@ -32,7 +32,7 @@ for transport.
 | `sanitize-ocp-bundle.py` | **Sanitizer.** Creates a pseudonymized copy of a bundle for external sharing. |
 | `ocp_analyzer.py` | **Offline analyzer.** Reads a bundle and generates markdown reports — for air-gapped situations where no AI review is possible. |
 | `pack-bundle.sh` / `unpack-bundle.sh` | **Transport.** Turn a bundle directory into one checksummed file and back. |
-| `skill/ocp-bundle-review/` | **Claude Code skill.** The full review methodology, for when the bundle *can* be analyzed with AI. |
+| `skills/ocp-bundle-review/` | **Claude Code skill.** The full review methodology, for when the bundle *can* be analyzed with AI. |
 | `tests/` | **Test suite** (stdlib `unittest`) — sanitizer leak tests and pack/unpack round-trip tests, with a synthetic fixture bundle (fake data only). |
 | `README.md`, `LICENSE` | This file; MIT license. |
 
@@ -201,9 +201,9 @@ checksum file only warns). Restores the original bundle directory.
 Copy the skill into your personal or project skills directory:
 
 ```bash
-cp -r skill/ocp-bundle-review ~/.claude/skills/          # personal, all projects
+cp -r skills/ocp-bundle-review ~/.claude/skills/          # personal, all projects
 # or
-cp -r skill/ocp-bundle-review <project>/.claude/skills/  # this project only
+cp -r skills/ocp-bundle-review <project>/.claude/skills/  # this project only
 ```
 
 Then, in a Claude Code session in the directory holding the bundle (and the
@@ -260,6 +260,22 @@ as a self-check that the tools work there.
   at build time (`BUILD_KNOWLEDGE_DATE` in `ocp_analyzer.py`) — refresh when
   updating the toolkit, and re-verify online when possible.
 
+## Related projects
+
+If this toolkit is useful to you, you may also be interested in:
+
+- **[in-cluster-checks](https://github.com/RedHatInsights/incluster-checks)**
+  by Red Hat Insights — a framework that runs health-validation rules
+  *directly on the cluster nodes* via `oc debug` (hardware, networking, Linux
+  and storage checks, executed live and in parallel). It takes the opposite
+  approach to this toolkit: it probes running nodes in-cluster, whereas
+  ocp-analyzer does read-only collection and reviews the data **offline**
+  (air-gapped-friendly, no node exec). The two complement each other well.
+
+*ocp-analyzer is an independent personal project. It is **not** affiliated
+with, endorsed by, or maintained by Red Hat or the Red Hat Insights team; the
+link above is provided purely as a helpful pointer.*
+
 ## License & disclaimer
 
 MIT — see [LICENSE](LICENSE). You may use, copy, modify and redistribute this
@@ -267,3 +283,6 @@ freely, **as long as the copyright notice stays intact** (that's the credit).
 The software is provided *"as is"*, without warranty of any kind; the author
 is **not liable for any claim, damage or other issue** arising from its use.
 Always review scripts before running them against production clusters.
+
+*OpenShift and Red Hat are trademarks of Red Hat, Inc. This project is an
+independent work and is not affiliated with or endorsed by Red Hat, Inc.*
