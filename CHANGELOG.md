@@ -4,6 +4,10 @@ All notable changes to this toolkit are recorded here. Dates are ISO (YYYY-MM-DD
 
 ## [Unreleased]
 
+(nothing yet)
+
+## [2026.07] - 2026-07-17
+
 ### Added
 
 Toolkit versioning (CalVer `YYYY.MM[.patch]`, starting at `2026.07`):
