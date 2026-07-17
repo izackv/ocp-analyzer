@@ -17,7 +17,60 @@ pip packages — just `bash`, `oc`, and Python 3.6+ (stock RHEL 8/9 is enough).
 > cloned before that date, update with:
 > `git fetch origin && git reset --hard origin/main && git fetch --tags --force`
 
-## Terminology (read this first)
+## Quick start
+
+### Get the code
+
+```bash
+git clone https://github.com/izackv/ocp-analyzer.git
+# air-gapped? download a release archive from GitHub instead and carry the
+# folder in — the target machine needs no internet or pip (see intro above)
+```
+
+### Get the data
+
+```bash
+# on a machine with cluster access; strictly read-only
+export KUBECONFIG=/path/to/kubeconfig
+./collect-ocp-review.sh                      # -> bundle dir: ocp-review_<cluster>_<ts>/
+./collect-ocp-review.sh --sanitize           # ...plus a sanitized copy for external sharing
+
+# analyzing on another machine? move the bundle as ONE checksummed file
+./pack-bundle.sh ocp-review_prod_20260705-090000
+#   ... transfer the .tar.gz + .sha256 ...
+./unpack-bundle.sh ocp-review_prod_20260705-090000.tar.gz
+```
+
+### Analyze the data with Python
+
+Runs wherever the bundle is — on the bastion itself or after transferring it.
+No cluster or internet access needed:
+
+```bash
+python3 ocp_analyzer.py ocp-review_prod_20260705-090000
+#   -> ocp-review_prod_20260705-090000-analysis/{architecture-overview,issues,manual-review-guide}.md
+```
+
+### Analyze the data with AI
+
+Likewise runs wherever the bundle is, in-place or transferred (details in
+"The Claude Code skill" below):
+
+```bash
+cp -r skills/ocp-bundle-review ~/.claude/skills/   # install the skill (once)
+# then, in a Claude Code session in the directory holding the bundle:
+/ocp-bundle-review
+```
+
+## Choosing a workflow
+
+| Situation | Do this |
+|---|---|
+| Bundle may leave the network, AI available | Collect → pack → transfer → review with the **skill** (deepest analysis) |
+| Bundle may leave only sanitized | Collect with `--sanitize` → pack the `-sanitized` directory → analyze that. Keep the reverse map at home; it translates findings back. |
+| Nothing leaves the network | Collect → run `ocp_analyzer.py` in place → hand the generated `.md` files to the reviewer. `manual-review-guide.md` tells a human what the analyzer could not judge. |
+
+## Terminology
 
 | Term | What it means |
 |---|---|
@@ -40,34 +93,6 @@ for transport.
 | `skills/ocp-bundle-review/` | **Claude Code skill.** The full review methodology, for when the bundle *can* be analyzed with AI. |
 | `tests/` | **Test suite** (stdlib `unittest`) — sanitizer leak tests and pack/unpack round-trip tests, with a synthetic fixture bundle (fake data only). |
 | `README.md`, `LICENSE` | This file; MIT license. |
-
-## Quick start
-
-```bash
-# 1. Collect (on a machine with cluster access; read-only)
-export KUBECONFIG=/path/to/kubeconfig
-./collect-ocp-review.sh                      # -> bundle dir: ocp-review_<cluster>_<ts>/
-./collect-ocp-review.sh --sanitize           # ...plus a sanitized copy
-
-# 2. Move the bundle as ONE file
-./pack-bundle.sh ocp-review_prod_20260705-090000
-#   ... transfer the .tar.gz + .sha256 ...
-./unpack-bundle.sh ocp-review_prod_20260705-090000.tar.gz
-
-# 3a. Analyze offline (air-gapped, no AI available)
-python3 ocp_analyzer.py ocp-review_prod_20260705-090000
-#   -> ocp-review_prod_20260705-090000-analysis/{architecture-overview,issues,manual-review-guide}.md
-
-# 3b. Or analyze with Claude Code (see "The Claude Code skill" below)
-```
-
-## Choosing a workflow
-
-| Situation | Do this |
-|---|---|
-| Bundle may leave the network, AI available | Collect → pack → transfer → review with the **skill** (deepest analysis) |
-| Bundle may leave only sanitized | Collect with `--sanitize` → pack the `-sanitized` directory → analyze that. Keep the reverse map at home; it translates findings back. |
-| Nothing leaves the network | Collect → run `ocp_analyzer.py` in place → hand the generated `.md` files to the reviewer. `manual-review-guide.md` tells a human what the analyzer could not judge. |
 
 ---
 
