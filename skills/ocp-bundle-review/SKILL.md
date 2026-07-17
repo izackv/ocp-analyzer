@@ -49,6 +49,12 @@ Work through ALL of these; each cites the file to check.
   any TSR etcd-latency findings.
 - `02-mcp.txt`, `02-machineconfigs.txt`, `02-kubeletconfig.yaml`: pools not
   converged; systemReserved vs node RAM.
+- `02-nodes-conditions.txt`: any node with MemoryPressure/DiskPressure/
+  PIDPressure=True (eviction risk) or NetworkUnavailable=True (no pod network).
+- `01-etcd-readyz.txt`: any `[-]` line = an API-server readiness gate failing
+  (etcd, informers, controllers). `01-etcd-cr.yaml`: etcd operator conditions
+  and control-plane member status. Note: WAL-fsync/backend-commit latency is
+  NOT in the bundle; recommend a live check if etcd latency is suspected.
 
 **Backup / DR (most-missed critical)**
 - `10-cronjobs.txt` + `06-pods-all.txt`: find backup/etcd-named CronJobs,
@@ -85,6 +91,12 @@ Work through ALL of these; each cites the file to check.
 - `07-oauth.yaml`: HTPasswd in production; `insecure: true` / `ldap://`
   (check last-applied annotation too — may be historical); mappingMethod.
 - `07-webhooks.txt`: failurePolicy=Fail on core resources.
+- `07-cert-expiry.txt`: platform cert expiry from the `certificate-not-after`
+  annotation (metadata only, no key material). Anything under ~30 days from the
+  collection date is a finding; cert-manager CRs are separate in
+  `07-certificates.txt`.
+- `07-acm-policies.txt`: RHACM policies reporting NonCompliant (governance/
+  config drift), if the cluster is ACM-managed.
 
 **Network**
 - `03-network-config.yaml`: cluster/service CIDRs private? (public ranges =
@@ -92,6 +104,12 @@ Work through ALL of these; each cites the file to check.
 - `03-networkpolicy.txt` vs `06-projects.txt`: coverage ratio.
 - `03-ingresscontroller.yaml`: replicas, zone spread, endpoint strategy.
 - `03-routes.txt`: routes without TLS termination.
+- `03-nnce.txt`: enactments in Failing/Aborted state (declared bond/VLAN/DNS/
+  bridge config did not apply on a node); `03-nncp.yaml` for the intended state.
+- `03-whereabouts-ippools.yaml`: allocations with an empty/absent `podref` =
+  leaked IPs that can exhaust the range. Cross-ref pods for true duplicates.
+- `03-ovnkube-pods.txt` vs `02-nodes-wide.txt`: every node needs one
+  `ovnkube-node` pod; a node without one has no working pod network.
 
 **Workloads / tenancy**
 - `06-pods-all.txt`: restart-count outliers (≥100), ImagePullBackOff (on
@@ -101,6 +119,9 @@ Work through ALL of these; each cites the file to check.
 - `06-pdb.txt`: ALLOWED=0 (blocks drains → blocks patching).
 - `06-resourcequota.txt`/`06-limitrange.txt` coverage; maxed-out quotas.
 - `06-projects.txt`: stale openshift-debug-*/must-gather-* namespaces.
+- `06-workloads-status.txt` / `06-daemonsets-status.txt`: Deployments/
+  StatefulSets with READY < DESIRED and DaemonSets with unavailable pods
+  (redundancy loss or crash loops); confirm against `06-pods-all.txt`.
 
 **Observability**
 - `08-cluster-monitoring.yaml`: additionalAlertmanagerConfigs (forwarding to

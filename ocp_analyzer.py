@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-ocp_analyzer.py — offline analyzer for OCP review bundles.
+ocp_analyzer.py - offline analyzer for OCP review bundles.
 
 Analyzes the output of collect-ocp-review.sh (v2) or collect-ocp-overview.sh
 (v1) WITHOUT any cluster or internet access, and generates:
@@ -11,7 +11,7 @@ Analyzes the output of collect-ocp-review.sh (v2) or collect-ocp-overview.sh
     manual-review-guide.md     what a human should still check in each file
 
 Design constraints (deliberate):
-  * Python 3.6+ standard library ONLY — runs on a stock RHEL 8/9 bastion in an
+  * Python 3.6+ standard library ONLY - runs on a stock RHEL 8/9 bastion in an
     air-gapped network, no pip required.
   * Never modifies the bundle; output goes to a sibling directory.
   * No YAML parser in stdlib -> YAML files are mined with targeted regexes,
@@ -32,7 +32,7 @@ from pathlib import Path
 
 SEV_ORDER = ["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"]
 
-# Static knowledge baked in at build time — verify against current Red Hat docs.
+# Static knowledge baked in at build time - verify against current Red Hat docs.
 BUILD_KNOWLEDGE_DATE = "2026-07"
 EUS_MINORS = {"4.12", "4.14", "4.16", "4.18", "4.20"}   # even minors are EUS
 DEFAULT_CLUSTER_ADMIN_CRBS = {
@@ -130,7 +130,7 @@ class Analyzer(object):
             "knowledge baked in at build time (%s) and MUST be re-verified "
             "online." % BUILD_KNOWLEDGE_DATE,
             "Workload classification (e.g. 'database on CephFS') is inferred "
-            "from PVC/namespace NAMES — a PVC named 'postgres-data' is assumed "
+            "from PVC/namespace NAMES - a PVC named 'postgres-data' is assumed "
             "to hold PostgreSQL. Verify before acting.",
             "Point-in-time data: the bundle reflects the cluster at collection "
             "time only; restart counts, alerts and pod states may differ now.",
@@ -210,7 +210,7 @@ class Analyzer(object):
                      "`force: true` set in ClusterVersion spec",
                      "01-clusterversion.yaml: spec.desiredUpdate.force: true.",
                      "The next upgrade will silently bypass upgradeable checks "
-                     "(admin acks, incompatible operators) — a common cause of "
+                     "(admin acks, incompatible operators) - a common cause of "
                      "wedged upgrades.",
                      "Clear spec.desiredUpdate; adopt a pre-upgrade checklist "
                      "instead of forcing.")
@@ -383,7 +383,7 @@ class Analyzer(object):
                      "06-pods-all.txt: " + ", ".join(pull_fail[:8]) +
                      ("..." if len(pull_fail) > 8 else ""),
                      "Services run below intended replicas AND the images are "
-                     "not pullable — a redeploy or node failure would not "
+                     "not pullable - a redeploy or node failure would not "
                      "recover these workloads. On disconnected clusters this "
                      "usually means images were removed from the mirror "
                      "registry.",
@@ -524,7 +524,7 @@ class Analyzer(object):
                      "Verify each workload; migrate genuine databases/ES data "
                      "volumes to block storage (Ceph RBD).",
                      assumption="Classified by PVC/namespace NAME matching "
-                                "database keywords — verify the actual "
+                                "database keywords - verify the actual "
                                 "workload before migrating.")
 
     def check_olm(self):
@@ -613,7 +613,7 @@ class Analyzer(object):
                      "%d PodDisruptionBudget(s) allow zero disruptions" % len(pdbs),
                      "06-pdb.txt (ALLOWED=0): " +
                      "; ".join(" ".join(l.split()[:2]) for l in pdbs[:6]),
-                     "Node drains hang on these pods — blocking MachineConfig "
+                     "Node drains hang on these pods - blocking MachineConfig "
                      "rollouts, patching and upgrades.",
                      "Add replicas or relax the PDBs so at least one "
                      "disruption is allowed.")
@@ -727,7 +727,7 @@ class Analyzer(object):
             self.add("HIGH", "Security",
                      "LDAP identity provider configured without TLS",
                      "07-oauth.yaml: 'insecure: true' and/or ldap:// URL "
-                     "(check also the last-applied annotation — it may be "
+                     "(check also the last-applied annotation - it may be "
                      "historical).",
                      "Bind credentials and user passwords cross the network "
                      "in cleartext.",
@@ -795,7 +795,7 @@ class Analyzer(object):
                  + ("present (alerts forwarded to an external/hub "
                     "Alertmanager)." if fwd else "absent."),
                  "Alertmanager receiver config lives in a Secret this bundle "
-                 "does not (and should not) collect — silent-alerting is the "
+                 "does not (and should not) collect - silent-alerting is the "
                  "most common root cause of long outages.",
                  "Send a synthetic test alert and confirm the on-call channel "
                  "receives it end-to-end.",
@@ -851,7 +851,7 @@ class Analyzer(object):
                      "GPU nodes present but no GPU Operator ClusterPolicy found",
                      "12-gpu-capacity.txt shows GPU capacity; clusterpolicy "
                      "file empty/absent.",
-                     "GPUs may be driven by manually installed drivers — "
+                     "GPUs may be driven by manually installed drivers - "
                      "unmanaged and upgrade-fragile.",
                      "Deploy/repair the NVIDIA GPU Operator.")
         if gpus and consumers == 0:
@@ -878,11 +878,204 @@ class Analyzer(object):
         self.facts["registry_state"] = yaml_grab(reg, "managementState")
         self.facts["argo_apps"] = len(self.b.lines("09-applications.txt"))
 
+    def check_node_pressure(self):
+        flagged = []
+        for line in self.b.lines("02-nodes-conditions.txt"):
+            tok = line.split()
+            if len(tok) < 6:
+                continue
+            pressures = [name for name, val in zip(
+                ("MemoryPressure", "DiskPressure", "PIDPressure",
+                 "NetworkUnavailable"), tok[2:6]) if val == "True"]
+            if pressures:
+                flagged.append("%s (%s)" % (tok[0], ", ".join(pressures)))
+        if flagged:
+            self.add("HIGH", "Stability",
+                     "%d node(s) reporting resource pressure" % len(flagged),
+                     "02-nodes-conditions.txt: " + "; ".join(flagged[:6]),
+                     "Nodes under Memory/Disk/PID pressure evict pods and stop "
+                     "scheduling; NetworkUnavailable means no pod network on "
+                     "that node.",
+                     "Free resources or add capacity on the affected nodes; "
+                     "check kubelet and CNI health.")
+
+    def check_workload_status(self):
+        under = []
+        for line in self.b.lines("06-workloads-status.txt"):
+            tok = line.split()
+            if len(tok) < 5:
+                continue
+            kind, ns, name, desired, ready = tok[:5]
+            if not desired.isdigit():
+                continue
+            got = ready if ready.isdigit() else "0"
+            if int(got) < int(desired):
+                under.append("%s %s/%s ready=%s/%s"
+                             % (kind, ns, name, got, desired))
+        for line in self.b.lines("06-daemonsets-status.txt"):
+            tok = line.split()
+            if len(tok) < 5:
+                continue
+            ns, name, _, _, unavail = tok[:5]
+            if unavail.isdigit() and int(unavail) > 0:
+                under.append("DaemonSet %s/%s unavailable=%s"
+                             % (ns, name, unavail))
+        if under:
+            self.add("MEDIUM", "Workloads",
+                     "%d workload(s) below desired replicas" % len(under),
+                     "06-workloads-status.txt / 06-daemonsets-status.txt: " +
+                     "; ".join(under[:8]) + ("..." if len(under) > 8 else ""),
+                     "Under-replicated Deployments/StatefulSets and DaemonSets "
+                     "with unavailable pods reduce redundancy or indicate crash "
+                     "loops.",
+                     "Correlate with 06-pods-all.txt and 11-events-warning.txt "
+                     "for the root cause.")
+
+    def check_nncp(self):
+        bad = []
+        for line in self.b.lines("03-nnce.txt"):
+            tok = line.split()
+            if len(tok) >= 2 and tok[1] in ("Failing", "Aborted"):
+                bad.append("%s (%s)" % (tok[0], tok[1]))
+        if bad:
+            self.add("HIGH", "Network",
+                     "%d node network enactment(s) not applied" % len(bad),
+                     "03-nnce.txt: " + "; ".join(bad[:8]),
+                     "Declared node network config (bonds, VLANs, DNS, "
+                     "bridges) failed to apply on these nodes; secondary "
+                     "networking may be broken.",
+                     "Inspect the failing NNCP (03-nncp.yaml) and the nmstate "
+                     "handler on the affected nodes.")
+
+    def check_whereabouts(self):
+        text = self.b.read("03-whereabouts-ippools.yaml")
+        if not text:
+            return
+        # allocation with an empty/absent podref = an IP reserved but not in use
+        orphans = len(re.findall(r'^\s*podref:\s*("")?\s*$', text, re.M))
+        if orphans:
+            self.add("MEDIUM", "Network",
+                     "%d Whereabouts IP allocation(s) without a pod reference"
+                     % orphans,
+                     "03-whereabouts-ippools.yaml: allocations missing podref.",
+                     "IPs reserved but not tied to a pod are leaked from the "
+                     "Whereabouts range and can exhaust it over time.",
+                     "Run the whereabouts ip-reconciler and verify no "
+                     "duplicate assignments.",
+                     assumption="Offline check flags allocations with an empty/"
+                                "absent podref only; cross-pod duplicate-IP "
+                                "detection needs live pod network-status.")
+
+    def check_etcd_health(self):
+        readyz = self.b.read("01-etcd-readyz.txt") or ""
+        failing = [l.strip() for l in readyz.splitlines() if l.startswith("[-]")]
+        if failing:
+            self.add("HIGH", "Stability",
+                     "%d API-server readiness gate(s) failing" % len(failing),
+                     "01-etcd-readyz.txt: " + "; ".join(failing[:6]),
+                     "A failing readyz gate (etcd, informers, controllers) "
+                     "means the control plane is not fully healthy.",
+                     "Investigate the named component; if etcd is listed, "
+                     "check control-plane node health and etcd pod status "
+                     "(01-etcd-cr.yaml).")
+
+    def check_ovnkube_coverage(self):
+        pods = self.b.lines("03-ovnkube-pods.txt")
+        if not pods:
+            return
+        # -o wide (namespace fixed): NAME READY STATUS RESTARTS AGE IP NODE ...
+        ovn_nodes = {tok[6] for tok in (l.split() for l in pods)
+                     if len(tok) >= 7 and tok[0].startswith("ovnkube-node-")}
+        node_names = {tok[0] for tok in
+                      (l.split() for l in self.b.lines("02-nodes-wide.txt"))
+                      if tok}
+        missing = node_names - ovn_nodes
+        if node_names and missing:
+            self.add("HIGH", "Network",
+                     "%d node(s) without an ovnkube-node pod" % len(missing),
+                     "03-ovnkube-pods.txt vs 02-nodes-wide.txt: " +
+                     ", ".join(sorted(missing)[:8]),
+                     "A node without its ovnkube-node pod has no functioning "
+                     "pod network; workloads scheduled there fail to get "
+                     "connectivity.",
+                     "Check the ovnkube-node DaemonSet and the node's "
+                     "kubelet/CNI.")
+
+    def check_acm_policies(self):
+        noncompliant = []
+        for line in self.b.lines("07-acm-policies.txt"):
+            if "NonCompliant" in line:
+                tok = line.split()
+                noncompliant.append("%s/%s" % (tok[0], tok[1])
+                                    if len(tok) >= 2 else line.strip())
+        if noncompliant:
+            self.add("HIGH", "Security",
+                     "%d RHACM policy(ies) NonCompliant" % len(noncompliant),
+                     "07-acm-policies.txt: " + "; ".join(noncompliant[:8]),
+                     "Governance policies enforced by RHACM are violated; the "
+                     "cluster has drifted from its declared security/config "
+                     "baseline.",
+                     "Review each NonCompliant policy and remediate the drift.")
+
+    def _collection_time(self):
+        m = re.search(r"_(\d{8})-(\d{6})$", self.b.path.name)
+        if not m:
+            return None
+        try:
+            return datetime.strptime(m.group(1) + m.group(2), "%Y%m%d%H%M%S")
+        except ValueError:
+            return None
+
+    def check_cert_expiry(self):
+        rows = self.b.lines("07-cert-expiry.txt")
+        now = self._collection_time()
+        if not rows or now is None:
+            return
+        soon = []
+        for line in rows:
+            tok = line.split()
+            if len(tok) < 3 or tok[2] in ("<none>", ""):
+                continue
+            try:
+                exp = datetime.strptime(tok[2], "%Y-%m-%dT%H:%M:%SZ")
+            except ValueError:
+                continue
+            days = (exp - now).days
+            if days <= 90:
+                soon.append((days, "%s/%s (%dd)" % (tok[0], tok[1], days)))
+        if not soon:
+            return
+        soon.sort()
+        buckets = [
+            ("CRITICAL", 7, [s for d, s in soon if d <= 7]),
+            ("HIGH", 30, [s for d, s in soon if 7 < d <= 30]),
+            ("MEDIUM", 90, [s for d, s in soon if 30 < d <= 90]),
+        ]
+        for sev, within, names in buckets:
+            if not names:
+                continue
+            self.add(sev, "Security",
+                     "%d certificate(s) expiring within %d days"
+                     % (len(names), within),
+                     "07-cert-expiry.txt: " + ", ".join(names[:8]) +
+                     ("..." if len(names) > 8 else ""),
+                     "Expired platform certificates break API/kubelet/serving "
+                     "TLS and can take the cluster offline.",
+                     "Confirm automatic cert rotation is healthy; renew any "
+                     "manually managed certificates before expiry.",
+                     assumption="Days counted from the bundle collection time "
+                                "(%s), not today; expiry read from the "
+                                "auth.openshift.io/certificate-not-after "
+                                "annotation (no key material)."
+                                % now.strftime("%Y-%m-%d"))
+
     ALL_CHECKS = [
         check_access, check_version, check_clusterversion,
-        check_clusteroperators, check_nodes, check_mcp, check_pods,
-        check_etcd_backup, check_storage, check_olm, check_tenancy,
-        check_pdb_webhooks, check_security, check_network, check_monitoring,
+        check_clusteroperators, check_nodes, check_node_pressure, check_mcp,
+        check_pods, check_workload_status, check_etcd_backup, check_etcd_health,
+        check_storage, check_olm, check_tenancy, check_pdb_webhooks,
+        check_security, check_acm_policies, check_cert_expiry, check_network,
+        check_nncp, check_whereabouts, check_ovnkube_coverage, check_monitoring,
         check_gpu, check_identity_facts, check_infra_facts,
     ]
 
@@ -908,7 +1101,7 @@ def render_overview(a, bundle_name):
     L = []
     L.append("# Architecture Overview (auto-generated, offline)")
     L.append("")
-    L.append("*Bundle:* `%s` — *generated:* %s by ocp_analyzer.py (offline)*"
+    L.append("*Bundle:* `%s` - *generated:* %s by ocp_analyzer.py (offline)*"
              % (bundle_name, datetime.now().strftime("%Y-%m-%d %H:%M")))
     L.append("")
     L.append("> This overview is machine-generated from `oc get` output only. "
@@ -1005,12 +1198,12 @@ def render_issues(a, bundle_name):
     L = []
     L.append("# Issues (auto-generated, offline)")
     L.append("")
-    L.append("*Bundle:* `%s` — findings: %s"
+    L.append("*Bundle:* `%s` - findings: %s"
              % (bundle_name,
                 ", ".join("%s: %d" % (s, counts[s]) for s in SEV_ORDER if s in counts)))
     L.append("")
     L.append("> Every finding cites the bundle file it came from. Findings "
-             "marked with an **Assumption** are heuristic — verify them "
+             "marked with an **Assumption** are heuristic - verify them "
              "before presenting to the customer. This offline analyzer "
              "CANNOT check: Red Hat lifecycle/CVE status, etcd latency "
              "metrics, Ceph internal health, or anything inside Secrets. "
@@ -1046,7 +1239,7 @@ GUIDE = [
       "`can-i create clusterrolebindings` MUST be `no` for a clean read-only "
       "audit; `yes` means results were collected with admin rights."]),
     ("01-*.{txt,yaml}", "Version & lifecycle",
-     ["Degraded/Progressing cluster operators (01-clusteroperators.*) — read "
+     ["Degraded/Progressing cluster operators (01-clusteroperators.*) - read "
       "the condition messages in the YAML, not just the table.",
       "ClusterVersion history: forced upgrades, acceptedRisks, update "
       "frequency (long gaps = patching debt), `force: true` left in spec.",
@@ -1069,7 +1262,7 @@ GUIDE = [
       "EgressIP placement; MetalLB/SR-IOV/NAD presence vs expectations."]),
     ("04-*.{txt,yaml}", "Storage",
      ["Released/Failed PVs (storage leaks); default StorageClass sanity.",
-      "Databases/Elasticsearch on CephFS or NFS-like classes — unsupported.",
+      "Databases/Elasticsearch on CephFS or NFS-like classes - unsupported.",
       "ODF: StorageCluster/CephCluster health, MDS/OSD sizing in the "
       "StorageCluster YAML, LocalVolume device paths (must be "
       "/dev/disk/by-id, NOT dm-name-*).",
@@ -1094,7 +1287,7 @@ GUIDE = [
       "(HTPasswd in prod? insecure LDAP?); token lifetimes.",
       "Webhooks with failurePolicy=Fail intercepting core resources."]),
     ("08-*.{txt,yaml,json}", "Observability",
-     ["Alertmanager receivers are in a Secret — VERIFY notification "
+     ["Alertmanager receivers are in a Secret - VERIFY notification "
       "end-to-end with a test alert; check additionalAlertmanagerConfigs.",
       "Active alerts snapshot: triage every critical.",
       "Prometheus retention/storage; logging stack version (ES 5.x is EOL), "
@@ -1105,12 +1298,12 @@ GUIDE = [
       "controller's RBAC (often cluster-admin)."]),
     ("10-*.txt", "Backup & DR",
      ["WHAT backs up etcd and applications? OADP/Velero/Kasten CRs here, or "
-      "backup-named CronJobs — then check their pods actually Complete.",
+      "backup-named CronJobs - then check their pods actually Complete.",
       "Ask for the last successful restore test; backups nobody restored "
       "are hopes, not backups."]),
     ("11-events-warning.txt", "Events",
      ["Recurring warning reasons (FailedScheduling, OOMKilling, "
-      "FailedMount, ImageGCFailed) — each recurring reason is usually a "
+      "FailedMount, ImageGCFailed) - each recurring reason is usually a "
       "finding in disguise."]),
     ("12-gpu-*.{txt,yaml}", "GPU / DGX",
      ["GPU capacity vs allocatable (mismatch = driver/device-plugin broken).",
@@ -1121,20 +1314,20 @@ GUIDE = [
       "GPU-consuming pods vs inventory (idle GPUs are expensive); "
       "PerformanceProfile for CPU isolation/hugepages.",
       "NOTE: GPU health (XID errors, nvidia-smi, DCGM diagnostics) is NOT "
-      "in the bundle — check DCGM metrics in the console."]),
+      "in the bundle - check DCGM metrics in the console."]),
 ]
 
 
 def render_guide(a, bundle_name):
     L = []
-    L.append("# Manual Review Guide — what to look for in each file")
+    L.append("# Manual Review Guide - what to look for in each file")
     L.append("")
     L.append("*Bundle:* `%s`. The analyzer automates part of this; this guide "
              "covers what a human reviewer should STILL examine, including "
              "everything the offline analyzer cannot judge." % bundle_name)
     L.append("")
     L.append("Files marked **MISSING** were not collected (older collector "
-             "version, or the resource/operator is absent on the cluster — "
+             "version, or the resource/operator is absent on the cluster - "
              "check the matching `.err` file).")
     L.append("")
     for pattern, title, items in GUIDE:
@@ -1143,7 +1336,7 @@ def render_guide(a, bundle_name):
         present = any(p.name.startswith(prefix) and not p.name.endswith(".err")
                       for p in a.b.path.iterdir()) if a.b.path.is_dir() else False
         L.append("## %s  (`%s`)%s" % (title, pattern,
-                                      "" if present else "  — **MISSING**"))
+                                      "" if present else "  - **MISSING**"))
         L.append("")
         for it in items:
             L.append("- %s" % it)
@@ -1151,16 +1344,16 @@ def render_guide(a, bundle_name):
     L.append("## What this bundle can NEVER show (collect separately)")
     L.append("")
     for item in [
-        "etcd disk latency / fsync metrics — Prometheus queries or a "
+        "etcd disk latency / fsync metrics - Prometheus queries or a "
         "must-gather; the #1 control-plane health signal.",
         "Ceph internal health (`ceph status`, full ratios, PG counts, OSD "
-        "crashes) — needs the rook-ceph toolbox or ODF must-gather.",
+        "crashes) - needs the rook-ceph toolbox or ODF must-gather.",
         "Secret contents: Alertmanager receivers, IdP bind credentials, "
         "certificates' expiry dates.",
         "Node-level state: SSH/config drift, disk health, GPU XID errors.",
         "Anything external: load balancers, DNS, firewall rules, storage "
         "arrays, the mirror registry's own health.",
-        "Current Red Hat lifecycle/CVE/errata status — must be checked "
+        "Current Red Hat lifecycle/CVE/errata status - must be checked "
         "online against the installed versions listed in the overview.",
     ]:
         L.append("- %s" % item)

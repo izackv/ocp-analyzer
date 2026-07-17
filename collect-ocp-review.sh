@@ -94,13 +94,17 @@ run "01-operatorhub.yaml"       get operatorhub cluster -o yaml         # defaul
 run "01-mirrors-icsp.yaml"      get imagecontentsourcepolicy -o yaml    # image mirror config (disconnected)
 run "01-mirrors-idms.yaml"      get imagedigestmirrorset -o yaml
 run "01-mirrors-itms.yaml"      get imagetagmirrorset -o yaml
+run "01-etcd-cr.yaml"           get etcd cluster -o yaml                 # etcd operator conditions + control-plane member status
+# read-only GET against the API-server readiness endpoint; shows per-component gates (etcd, informers)
+run "01-etcd-readyz.txt"        get --request-timeout=20s --raw "/readyz?verbose"
 
 # ---- 2. Topology & compute --------------------------------------------------
 log "Nodes, machine config, MCPs"
 run "02-nodes-wide.txt"         get nodes -o wide
 run "02-nodes-roles-zones.txt"  get nodes -L node-role.kubernetes.io/master -L node-role.kubernetes.io/worker -L node-role.kubernetes.io/infra -L topology.kubernetes.io/zone -L failure-domain.beta.kubernetes.io/zone
 run "02-nodes-capacity.txt"     get nodes -o custom-columns=NAME:.metadata.name,CPU:.status.capacity.cpu,MEM:.status.capacity.memory,ALLOC-CPU:.status.allocatable.cpu,ALLOC-MEM:.status.allocatable.memory,KERNEL:.status.nodeInfo.kernelVersion,RUNTIME:.status.nodeInfo.containerRuntimeVersion
-run "02-nodes-conditions.txt"   get nodes -o custom-columns=NAME:.metadata.name,READY:.status.conditions[-1].type,TAINTS:.spec.taints[*].key
+# quoted because the jsonpath condition filters contain shell metacharacters ( ) *
+run "02-nodes-conditions.txt"   get nodes -o "custom-columns=NAME:.metadata.name,READY:.status.conditions[?(@.type=='Ready')].status,MEM-PRESSURE:.status.conditions[?(@.type=='MemoryPressure')].status,DISK-PRESSURE:.status.conditions[?(@.type=='DiskPressure')].status,PID-PRESSURE:.status.conditions[?(@.type=='PIDPressure')].status,NET-UNAVAIL:.status.conditions[?(@.type=='NetworkUnavailable')].status,TAINTS:.spec.taints[*].key"
 run "02-mcp.txt"                get machineconfigpool
 run "02-machineconfigs.txt"     get machineconfig                        # names reveal overlapping custom MCs
 run "02-kubeletconfig.yaml"     get kubeletconfig -o yaml                # systemReserved etc.
@@ -127,6 +131,11 @@ run "03-egressfirewall.txt"     get egressfirewall -A
 run "03-metallb.txt"            get ipaddresspools,l2advertisements,bgpadvertisements -A
 run "03-net-attach-def.txt"     get network-attachment-definitions -A
 run "03-sriov.txt"              get sriovnetworknodepolicy,sriovnetwork -A
+run "03-nncp.yaml"              get nncp -o yaml                         # NodeNetworkConfigurationPolicy status (nmstate)
+run "03-nnce.txt"               get nnce                                 # per-node enactment of the NNCPs above
+run "03-whereabouts-ippools.yaml" get ippools -A -o yaml                # Whereabouts IPAM pools: allocations, podrefs (duplicate/orphan IP detection)
+run "03-whereabouts-overlap.txt"  get overlappingrangeipreservations -A
+run "03-ovnkube-pods.txt"       get pods -n openshift-ovn-kubernetes -o wide   # expect one ovnkube-node pod per node
 
 # ---- 4. Storage -------------------------------------------------------------
 log "Storage"
@@ -167,6 +176,8 @@ run "06-limitrange.txt"         get limitrange -A
 run "06-pods-all.txt"           get pods -A -o wide
 run "06-top-pods.txt"           adm top pods -A --sum
 run "06-workloads.txt"          get deploy,statefulset,daemonset -A
+run "06-workloads-status.txt"   get deploy,statefulset -A -o custom-columns=KIND:.kind,NS:.metadata.namespace,NAME:.metadata.name,DESIRED:.spec.replicas,READY:.status.readyReplicas   # replica parity
+run "06-daemonsets-status.txt"  get daemonset -A -o custom-columns=NS:.metadata.namespace,NAME:.metadata.name,DESIRED:.status.desiredNumberScheduled,READY:.status.numberReady,UNAVAIL:.status.numberUnavailable
 run "06-hpa.txt"                get hpa -A
 run "06-pdb.txt"                get pdb -A -o custom-columns=NS:.metadata.namespace,NAME:.metadata.name,MIN-AVAIL:.spec.minAvailable,MAX-UNAVAIL:.spec.maxUnavailable,ALLOWED:.status.disruptionsAllowed
 run "06-jobs.txt"               get jobs -A
@@ -193,6 +204,9 @@ run "07-certificates.txt"       get certificates.cert-manager.io -A
 run "07-acs-central.txt"        get central -A
 run "07-acs-secured.txt"        get securedcluster -A
 run "07-compliance.txt"         get compliancesuite,compliancescan -A    # Compliance Operator, if present
+run "07-acm-policies.txt"       get policies.policy.open-cluster-management.io -A   # RHACM governance compliance, if ACM present
+# cert expiry from the not-after ANNOTATION only (metadata); the certificate and key bytes in .data are never read
+run "07-cert-expiry.txt"        get secret -A -o custom-columns=NS:.metadata.namespace,NAME:.metadata.name,NOT-AFTER:.metadata.annotations.auth\\.openshift\\.io/certificate-not-after,ISSUER:.metadata.annotations.auth\\.openshift\\.io/certificate-issuer
 
 # ---- 8. Observability -------------------------------------------------------
 log "Observability"
@@ -301,6 +315,23 @@ log "Building SUMMARY.txt"
   awk 'NR>1 && $2!="<none>" && $2!=""{n++} END{if(!n) print "  (no GPU nodes detected)"}' "$OUT/12-gpu-capacity.txt" 2>/dev/null
   GPU_PODS=$(awk 'NR>1 && $4 ~ /^[0-9]/' "$OUT/12-gpu-consumers.txt" 2>/dev/null | wc -l | tr -d ' ')
   echo "  pods requesting GPUs: ${GPU_PODS:-0}"
+  echo
+  echo "## Nodes reporting pressure (Memory/Disk/PID/NetworkUnavailable)"
+  awk 'NR>1 && ($3=="True"||$4=="True"||$5=="True"||$6=="True"){print "  "$1}' "$OUT/02-nodes-conditions.txt" 2>/dev/null | head -20
+  echo
+  echo "## etcd / apiserver readiness gates failing (from /readyz?verbose)"
+  grep -E '^\[-\]' "$OUT/01-etcd-readyz.txt" 2>/dev/null | head -20
+  echo
+  echo "## ovnkube-node coverage (a node without a pod has no working pod network)"
+  NODES=$(tail -n +2 "$OUT/02-nodes-wide.txt" 2>/dev/null | wc -l | tr -d ' ')
+  OVN=$(grep -c 'ovnkube-node-' "$OUT/03-ovnkube-pods.txt" 2>/dev/null)
+  echo "  nodes: ${NODES:-?} | ovnkube-node pods: ${OVN:-0}"
+  echo
+  echo "## Workloads with READY < DESIRED (deploy/statefulset)"
+  awk 'NR>1 && $4!="<none>" && $5!="<none>" && ($5+0)<($4+0){print "  "$1" "$2"/"$3"  ready="$5"/"$4}' "$OUT/06-workloads-status.txt" 2>/dev/null | head -20
+  echo
+  echo "## RHACM policies NonCompliant"
+  grep -i 'NonCompliant' "$OUT/07-acm-policies.txt" 2>/dev/null | head -20
 } > "$OUT/SUMMARY.txt"
 
 echo

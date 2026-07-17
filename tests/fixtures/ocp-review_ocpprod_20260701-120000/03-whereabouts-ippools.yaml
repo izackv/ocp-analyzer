@@ -1,0 +1,17 @@
+apiVersion: v1
+items:
+- apiVersion: whereabouts.cni.cncf.io/v1alpha1
+  kind: IPPool
+  metadata:
+    name: 10.128.0.0-24
+    namespace: openshift-multus
+  spec:
+    range: 10.128.0.0/24
+    allocations:
+      "12":
+        id: 6f1a
+        podref: tenant-a/app-0
+      "13":
+        id: 7c2b
+        podref: ""
+kind: List

@@ -260,6 +260,42 @@ as a self-check that the tools work there.
   at build time (`BUILD_KNOWLEDGE_DATE` in `ocp_analyzer.py`) — refresh when
   updating the toolkit, and re-verify online when possible.
 
+## Checks inspired by in-cluster-checks
+
+Some of the collector's later checks were inspired by the Red Hat
+[in-cluster-checks](https://github.com/RedHatInsights/incluster-checks)
+project, which validates cluster health by running rules **on the nodes** via
+`oc debug`. The **ideas** were reused, not the code: in-cluster-checks is a
+Python rule engine that needs live, privileged node access, whereas this
+toolkit stays read-only, offline-analyzable, and `oc get`-only. Where one of
+its node-level rules describes a condition that is also visible at the cluster
+API, that condition was reproduced here as a plain read-only collection line.
+
+Only the API-visible subset was ported. Node-shell-only checks (BIOS/firmware
+inventory, OVS/OVN internal state, Ceph OSD internals, thermal sensors, SELinux,
+etcd WAL-fsync latency, and similar) are intentionally out of scope, because
+they cannot be gathered without a shell on the node. For those, use
+in-cluster-checks or a live session; the two tools stay complementary.
+
+Collection lines added under this inspiration (all strictly read-only):
+
+| Area | Command | Condition it surfaces |
+|---|---|---|
+| Control plane | `oc get etcd cluster -o yaml` | etcd operator conditions, member status |
+| Control plane | `oc get --raw /readyz?verbose` | per-component API readiness gates (etcd, informers) |
+| Nodes | `oc get nodes` (condition columns) | MemoryPressure / DiskPressure / PIDPressure / NetworkUnavailable |
+| Networking | `oc get nncp -o yaml`, `oc get nnce` | NodeNetworkConfigurationPolicy status and per-node enactment |
+| Networking | `oc get ippools -A -o yaml` | Whereabouts IPAM allocations (leaked/orphan IPs) |
+| Networking | `oc get pods -n openshift-ovn-kubernetes -o wide` | one ovnkube-node pod per node (pod network up) |
+| Workloads | `oc get deploy,statefulset,daemonset` (status columns) | replicas ready vs desired |
+| Security | `oc get policies.policy.open-cluster-management.io -A` | RHACM governance compliance |
+| Security | `oc get secret -A` (not-after annotation only) | platform certificate expiry (metadata only, never key data) |
+
+The certificate-expiry line reads only the
+`auth.openshift.io/certificate-not-after` **annotation**; the certificate and
+key bytes in a Secret's `data` are never read, keeping the collector's
+read-only, no-secret-data guarantee intact.
+
 ## Related projects
 
 If this toolkit is useful to you, you may also be interested in:

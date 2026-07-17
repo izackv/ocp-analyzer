@@ -1,0 +1,4 @@
+NS                          NAME                                          NOT-AFTER              ISSUER
+openshift-etcd              etcd-serving-master-0.ocpprod.acme-corp.com   2026-07-05T00:00:00Z   etcd-signer
+openshift-kube-apiserver    serving-cert                                  2026-09-01T00:00:00Z   kube-apiserver-signer
+default                     plain-secret                                  <none>                 <none>

@@ -1,0 +1,3 @@
+NAME                                            STATUS
+master-0.ocpprod.acme-corp.com.bond0-policy     Available
+worker-1.ocpprod.acme-corp.com.bond0-policy     Failing
