@@ -12,6 +12,11 @@ pip packages — just `bash`, `oc`, and Python 3.6+ (stock RHEL 8/9 is enough).
 > responsible for reviewing what it does and for any consequences of using it
 > in your environment. See [LICENSE](LICENSE).
 
+> **Note for existing clones:** repository history was rewritten on
+> 2026-07-18 (commit messages only — file contents are unchanged). If you
+> cloned before that date, update with:
+> `git fetch origin && git reset --hard origin/main && git fetch --tags --force`
+
 ## Terminology (read this first)
 
 | Term | What it means |
