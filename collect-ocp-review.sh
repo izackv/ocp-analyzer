@@ -201,7 +201,8 @@ run "06-priorityclasses.txt"    get priorityclasses
 # ---- 7. Security & access ---------------------------------------------------
 log "Security & access"
 run "07-oauth.yaml"             get oauth cluster -o yaml
-run "07-oauthclients.txt"       get oauthclients
+# custom columns: the default oauthclients table prints the client SECRET in cleartext
+run "07-oauthclients.txt"       get oauthclients -o custom-columns=NAME:.metadata.name,WWW-CHALLENGE:.respondWithChallenges,TOKEN-MAX-AGE:.accessTokenMaxAgeSeconds,GRANT-METHOD:.grantMethod,REDIRECT-URIS:.redirectURIs[*]
 run "07-users.txt"              get user
 run "07-groups.txt"             get groups
 run "07-identities.txt"         get identity

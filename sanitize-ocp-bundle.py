@@ -18,6 +18,9 @@ What gets replaced (consistently across all files):
   * e-mail addresses                            -> userNNNN@example.com
   * LDAP DN components (CN=/OU=/DC=...)         -> CN=REDACTED,...
   * non-ASCII runs (e.g. Hebrew full names)     -> REDACTED-NAME
+  * OAuth client secrets (oauthclients table
+    SECRET column and yaml secret: fields)      -> REDACTED-OAUTH-SECRET
+    (irreversible: secrets are never written to the map file)
   * any extra strings given with --replace
 
 Usage:
@@ -41,6 +44,9 @@ UUID_RE = re.compile(
 EMAIL_RE = re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")
 NONASCII_RE = re.compile(r"[^\x00-\x7F][^\x00-\x7F\s]*(?:\s+[^\x00-\x7F][^\x00-\x7F\s]*)*")
 DN_RE = re.compile(r"\b(CN|OU|DC)=([^,\"'\n{}]+)", re.IGNORECASE)
+# `secret: <value>` on one line, as in OAuthClient yaml. Does not match the
+# `clientSecret:` name reference in oauth.yaml (value is on the next line).
+SECRET_LINE_RE = re.compile(r"^(\s*(?:secret|clientSecret):\s*)(\S+)\s*$", re.MULTILINE)
 
 
 def detect_domains(bundle: Path):
@@ -78,6 +84,24 @@ def _column_slice(header: str, line: str, col: str, next_cols):
         if pos > start:
             end = min(end, pos)
     return line[start:end]
+
+
+def redact_oauthclient_table(text: str) -> str:
+    """Blank the SECRET column of a default `oc get oauthclients` table
+    (bundles from collectors older than 2026.07 contain it). Irreversible on
+    purpose: secrets are redacted, never mapped."""
+    lines = text.splitlines(keepends=True)
+    if not lines or "SECRET" not in lines[0]:
+        return text
+    header = lines[0]
+    out = [header]
+    for line in lines[1:]:
+        tok = _column_slice(header, line, "SECRET",
+                            ("WWW-CHALLENGE", "TOKEN-MAX-AGE")).strip()
+        if tok:
+            line = line.replace(tok, "REDACTED-OAUTH-SECRET", 1)
+        out.append(line)
+    return "".join(out)
 
 
 def detect_usernames(bundle: Path):
@@ -272,6 +296,7 @@ def main():
         text = IP_RE.sub(lambda m: pseudo.ip(m.group(1)), text)
         text = DN_RE.sub(lambda m: f"{m.group(1)}=REDACTED", text)
         text = NONASCII_RE.sub("REDACTED-NAME", text)
+        text = SECRET_LINE_RE.sub(lambda m: m.group(1) + "REDACTED-OAUTH-SECRET", text)
         return text
 
     # ---- process files ----
@@ -282,7 +307,10 @@ def main():
         if f.suffix.lower() not in TEXT_SUFFIXES:
             skipped.append(f.name)
             continue
-        (outdir / f.name).write_text(sanitize_text(f.read_text(errors="replace")))
+        text = f.read_text(errors="replace")
+        if "oauthclient" in f.name.lower():
+            text = redact_oauthclient_table(text)
+        (outdir / f.name).write_text(sanitize_text(text))
         done += 1
 
     # ---- write the private map ----

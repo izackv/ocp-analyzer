@@ -50,6 +50,9 @@ else
 fi
 
 tar -xzf "$ARCHIVE" -C "$DEST"
-TOP="$(tar -tzf "$ARCHIVE" 2>/dev/null | head -1 | sed 's|/.*||')"
+# no `| head -1` here: head exiting early SIGPIPEs GNU tar, which kills the
+# script under pipefail; read the full listing instead
+LISTING="$(tar -tzf "$ARCHIVE" 2>/dev/null)"
+TOP="${LISTING%%$'\n'*}"; TOP="${TOP%%/*}"
 if [ -n "$CLEANUP" ]; then rm -f "$CLEANUP"; fi
 echo "unpacked into: $DEST/${TOP:+ (top-level dir: $TOP)}"

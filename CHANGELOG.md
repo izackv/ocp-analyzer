@@ -4,7 +4,26 @@ All notable changes to this toolkit are recorded here. Dates are ISO (YYYY-MM-DD
 
 ## [Unreleased]
 
-(nothing yet)
+### Fixed
+
+- `unpack-bundle.sh`: intermittent exit 141 on Linux (GNU tar receiving
+  SIGPIPE from `tar -tzf | head -1` under `set -o pipefail`, after a
+  successful extraction). The top-level-dir detection now reads the full
+  listing instead of exiting the pipe early. Found by running the test
+  suite on a RHEL host; macOS buffering masked it.
+
+### Security
+
+- `collect-ocp-review.sh`: `07-oauthclients.txt` no longer contains OAuth
+  client secrets. The default `oc get oauthclients` table prints the SECRET
+  column in cleartext; the collector now uses custom columns (name,
+  challenge/grant flags, token max age, redirect URIs) instead.
+- `sanitize-ocp-bundle.py`: defense in depth for bundles collected before
+  this fix - the SECRET column of an oauthclients table and single-line
+  `secret:`/`clientSecret:` yaml fields are replaced with
+  `REDACTED-OAUTH-SECRET`. Redaction is irreversible: secrets are never
+  written to the private map file. Leak tests added in
+  `tests/test_sanitizer.py` with a seeded fixture.
 
 ## [2026.07] - 2026-07-17
 

@@ -38,6 +38,10 @@ SENSITIVE = [
     "john.smith",                              # email local part
     "svc-ocp-bind", "Service Accounts",        # LDAP DN components
     "יוסי", "כהן",                             # non-ASCII full name
+    # OAuth client secrets from 07-oauthclients.txt (pre-2026.07 collectors
+    # captured the cleartext SECRET column)
+    "FakeSecA1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8",
+    "FakeSecZ9y8X7w6V5u4T3s2R1q0P9o8N7m6L5k4J3i2",
 ]
 
 
@@ -147,6 +151,24 @@ class SanitizerTest(unittest.TestCase):
         self.assertNotIn("acme-corp", err)
         self.assertNotIn("jsmith", err)
 
+    # ---- OAuth client secrets ----------------------------------------------
+    def test_oauthclient_secret_column_redacted(self):
+        """Both real secrets redacted; the empty-SECRET row and the header
+        stay intact."""
+        out = self.read_out("07-oauthclients.txt")
+        self.assertEqual(out.count("REDACTED-OAUTH-SECRET"), 2)
+        lines = out.splitlines()
+        self.assertIn("SECRET", lines[0])
+        challenging = [l for l in lines if l.startswith("openshift-challenging-client")]
+        self.assertEqual(len(challenging), 1)
+        self.assertNotIn("REDACTED-OAUTH-SECRET", challenging[0])
+
+    def test_oauthclient_secrets_not_in_map(self):
+        """Secrets are redacted, not pseudonymized: the private map must not
+        make them recoverable."""
+        map_text = self.mapfile.read_text()
+        self.assertNotIn("FakeSec", map_text)
+
     # ---- safety properties -------------------------------------------------
     def test_original_bundle_untouched(self):
         self.assertEqual(self.hashes_before, dir_hashes(self.bundle))
@@ -180,6 +202,24 @@ class SanitizerOptionsTest(unittest.TestCase):
         self.assertIn("SOME-NAME", text)
         self.assertNotIn("ocp-admins", text)     # default replacement: REDACTED
         self.assertIn("REDACTED", text)
+
+    def test_yaml_secret_line_redacted(self):
+        """`secret: <value>` yaml lines are redacted in any file; the
+        `clientSecret:` name reference (value on the next line) is kept."""
+        (self.bundle / "07-oauthclient-console.yaml").write_text(
+            "kind: OAuthClient\n"
+            "metadata:\n"
+            "  name: console\n"
+            "secret: FakeYamlSecQ7w8E9r0T1y2U3i4O5p6A7s8D9f0G1h2\n"
+            "clientSecret:\n"
+            "  name: openid-client-secret\n")
+        outdir = self.tmp / "out"
+        res = run_sanitizer(self.bundle, outdir)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        out = (outdir / "07-oauthclient-console.yaml").read_text()
+        self.assertNotIn("FakeYamlSec", out)
+        self.assertIn("secret: REDACTED-OAUTH-SECRET", out)
+        self.assertIn("name: openid-client-secret", out)
 
     def test_refuses_non_empty_output_dir(self):
         outdir = self.tmp / "out"
