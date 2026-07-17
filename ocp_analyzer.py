@@ -32,6 +32,12 @@ from pathlib import Path
 
 SEV_ORDER = ["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"]
 
+# Toolkit release (CalVer YYYY.MM[.patch]); released together with
+# collect-ocp-review.sh, which stamps the same values into 00-meta.txt.
+# BUNDLE_FORMAT is the newest bundle layout this analyzer understands.
+TOOLKIT_VERSION = "2026.07"
+BUNDLE_FORMAT = 2
+
 # Static knowledge baked in at build time - verify against current Red Hat docs.
 BUILD_KNOWLEDGE_DATE = "2026-07"
 EUS_MINORS = {"4.12", "4.14", "4.16", "4.18", "4.20"}   # even minors are EUS
@@ -145,6 +151,27 @@ class Analyzer(object):
         })
 
     # ---- individual checks -------------------------------------------------
+    def check_meta(self):
+        t = self.b.read("00-meta.txt")
+        if t is None:
+            self.facts["collector_version"] = "unknown (pre-2026.07 collector)"
+            return
+        self.facts["collector_version"] = yaml_grab(t, "toolkit-version") or "?"
+        fmt = yaml_grab(t, "bundle-format")
+        if fmt and fmt.isdigit():
+            self.facts["bundle_format"] = int(fmt)
+            if int(fmt) > BUNDLE_FORMAT:
+                self.add("INFO", "Analyzer",
+                         "Bundle format %s is newer than this analyzer "
+                         "(format %d)" % (fmt, BUNDLE_FORMAT),
+                         "00-meta.txt: bundle-format: %s; analyzer %s."
+                         % (fmt, TOOLKIT_VERSION),
+                         "Files may have been renamed or restructured since "
+                         "this analyzer was released; some checks may "
+                         "silently miss their input.",
+                         "Re-run with an analyzer from the same toolkit "
+                         "release as the collector.")
+
     def check_access(self):
         t = self.b.read("00-access.txt")
         if not t:
@@ -1070,7 +1097,7 @@ class Analyzer(object):
                                 % now.strftime("%Y-%m-%d"))
 
     ALL_CHECKS = [
-        check_access, check_version, check_clusterversion,
+        check_meta, check_access, check_version, check_clusterversion,
         check_clusteroperators, check_nodes, check_node_pressure, check_mcp,
         check_pods, check_workload_status, check_etcd_backup, check_etcd_health,
         check_storage, check_olm, check_tenancy, check_pdb_webhooks,
@@ -1101,8 +1128,11 @@ def render_overview(a, bundle_name):
     L = []
     L.append("# Architecture Overview (auto-generated, offline)")
     L.append("")
-    L.append("*Bundle:* `%s` - *generated:* %s by ocp_analyzer.py (offline)*"
-             % (bundle_name, datetime.now().strftime("%Y-%m-%d %H:%M")))
+    L.append("*Bundle:* `%s` (collector %s) - *generated:* %s by "
+             "ocp_analyzer.py %s, knowledge %s (offline)*"
+             % (bundle_name, f.get("collector_version", "?"),
+                datetime.now().strftime("%Y-%m-%d %H:%M"),
+                TOOLKIT_VERSION, BUILD_KNOWLEDGE_DATE))
     L.append("")
     L.append("> This overview is machine-generated from `oc get` output only. "
              "Anything the collector could not see (external load balancers, "
@@ -1198,8 +1228,8 @@ def render_issues(a, bundle_name):
     L = []
     L.append("# Issues (auto-generated, offline)")
     L.append("")
-    L.append("*Bundle:* `%s` - findings: %s"
-             % (bundle_name,
+    L.append("*Bundle:* `%s` - analyzer %s (knowledge %s) - findings: %s"
+             % (bundle_name, TOOLKIT_VERSION, BUILD_KNOWLEDGE_DATE,
                 ", ".join("%s: %d" % (s, counts[s]) for s in SEV_ORDER if s in counts)))
     L.append("")
     L.append("> Every finding cites the bundle file it came from. Findings "
@@ -1322,9 +1352,11 @@ def render_guide(a, bundle_name):
     L = []
     L.append("# Manual Review Guide - what to look for in each file")
     L.append("")
-    L.append("*Bundle:* `%s`. The analyzer automates part of this; this guide "
+    L.append("*Bundle:* `%s` (analyzer %s). "
+             "The analyzer automates part of this; this guide "
              "covers what a human reviewer should STILL examine, including "
-             "everything the offline analyzer cannot judge." % bundle_name)
+             "everything the offline analyzer cannot judge."
+             % (bundle_name, TOOLKIT_VERSION))
     L.append("")
     L.append("Files marked **MISSING** were not collected (older collector "
              "version, or the resource/operator is absent on the cluster - "
@@ -1368,6 +1400,10 @@ def main():
     ap.add_argument("bundle", help="bundle directory (collect-ocp-review.sh output)")
     ap.add_argument("-o", "--outdir",
                     help="output directory (default: <bundle>-analysis)")
+    ap.add_argument("--version", action="version",
+                    version="ocp_analyzer.py %s (bundle format %d, knowledge %s)"
+                            % (TOOLKIT_VERSION, BUNDLE_FORMAT,
+                               BUILD_KNOWLEDGE_DATE))
     args = ap.parse_args()
 
     bdir = Path(args.bundle.rstrip("/") or "/")
@@ -1391,7 +1427,10 @@ def main():
     counts = {}
     for f in a.findings:
         counts[f["sev"]] = counts.get(f["sev"], 0) + 1
-    print("analyzed bundle : %s" % bdir)
+    print("analyzer        : %s (knowledge %s)"
+          % (TOOLKIT_VERSION, BUILD_KNOWLEDGE_DATE))
+    print("analyzed bundle : %s (collector %s)"
+          % (bdir, a.facts.get("collector_version", "?")))
     print("findings        : " + (", ".join(
         "%s=%d" % (s, counts[s]) for s in SEV_ORDER if s in counts) or "none"))
     print("reports written : %s" % outdir)

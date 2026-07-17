@@ -6,6 +6,17 @@ All notable changes to this toolkit are recorded here. Dates are ISO (YYYY-MM-DD
 
 ### Added
 
+Toolkit versioning (CalVer `YYYY.MM[.patch]`, starting at `2026.07`):
+
+- `TOOLKIT_VERSION` and `BUNDLE_FORMAT` constants in both
+  `collect-ocp-review.sh` and `ocp_analyzer.py`; the collector stamps them
+  with the collection timestamp and cluster label into `00-meta.txt` in every
+  bundle.
+- The analyzer (`check_meta`) reads the stamp, shows the collector version in
+  all report headers and the CLI summary, and raises an INFO finding when the
+  bundle format is newer than the analyzer. `--version` flag added.
+- README section on the versioning scheme and release procedure.
+
 Collection checks inspired by the read-only, API-visible subset of Red Hat's
 in-cluster-checks project (ideas reused, not code). All strictly read-only:
 

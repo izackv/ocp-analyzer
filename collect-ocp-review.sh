@@ -27,6 +27,12 @@
 #
 set -uo pipefail
 
+# Toolkit release (CalVer YYYY.MM[.patch]) and bundle layout format.
+# BUNDLE_FORMAT only changes when files are renamed/removed or their layout
+# changes incompatibly - NOT when new collection lines are added.
+TOOLKIT_VERSION="2026.07"
+BUNDLE_FORMAT=2
+
 SANITIZE=0
 CLUSTER_LABEL=""
 for arg in "$@"; do
@@ -43,6 +49,15 @@ TS="$(date +%Y%m%d-%H%M%S)"
 OUT="ocp-review_${CLUSTER_LABEL}_${TS}"
 mkdir -p "$OUT"
 
+# Stamp the bundle so the analyzer (possibly a different release, run weeks
+# later on another machine) can detect version/format mismatches.
+{
+  echo "toolkit-version: $TOOLKIT_VERSION"
+  echo "bundle-format: $BUNDLE_FORMAT"
+  echo "collected: $TS"
+  echo "cluster-label: $CLUSTER_LABEL"
+} > "$OUT/00-meta.txt"
+
 log()  { printf '  [+] %s\n' "$1"; }
 warn() { printf '  [!] %s\n' "$1" >&2; }
 
@@ -57,7 +72,7 @@ run() {
   fi
 }
 
-echo "=== OCP Review collection: $CLUSTER_LABEL ==="
+echo "=== OCP Review collection: $CLUSTER_LABEL (toolkit $TOOLKIT_VERSION) ==="
 echo "    Output dir: $OUT"
 
 # ---- 0. Access sanity -------------------------------------------------------

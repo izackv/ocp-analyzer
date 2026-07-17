@@ -15,7 +15,9 @@ be backed by a file in the bundle (or a cited TSR section).
 
 1. **Locate the data.** Find the bundle directory (files may be at the top
    level or in a `ocp-review_*` subdirectory). Read `SUMMARY.txt` first if
-   present. Read the collection script if present — it maps each output file
+   present; `00-meta.txt` (if present) gives the collector version, bundle
+   format, and collection timestamp — quote the collection time in the review
+   (the data is a point-in-time snapshot). Read the collection script if present — it maps each output file
    to the exact `oc` command, which you must cite as evidence.
 2. **Orient.** Read the small files fully (00, 01, 02, 03-network-config,
    04-storageclasses/storagecluster, 05-catalogsource/subscriptions/

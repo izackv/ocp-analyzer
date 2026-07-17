@@ -296,6 +296,42 @@ The certificate-expiry line reads only the
 key bytes in a Secret's `data` are never read, keeping the collector's
 read-only, no-secret-data guarantee intact.
 
+## Versioning & releases
+
+The toolkit uses **CalVer**: `YYYY.MM`, with a `.patch` suffix only if the
+same month gets a second release (e.g. `2026.07`, then `2026.07.1`). A date
+makes the most important property — how stale the analyzer's baked-in
+knowledge is — visible at a glance; the collector and analyzer are always
+released together under one number.
+
+Two version numbers exist, on different cadences:
+
+- **`TOOLKIT_VERSION`** (in both `collect-ocp-review.sh` and
+  `ocp_analyzer.py`) — the release of the tools themselves.
+- **`BUNDLE_FORMAT`** (currently `2`) — the bundle *layout*. It only changes
+  when files are renamed/removed or restructured incompatibly, **not** when
+  new collection lines are added; the analyzer already tolerates missing
+  files.
+
+The collector stamps both into `00-meta.txt` inside every bundle, along with
+the collection timestamp and cluster label. The analyzer reads that stamp,
+reports the collector version in every generated report header, and raises an
+INFO finding if the bundle format is newer than the analyzer understands.
+Bundles without `00-meta.txt` are simply from a pre-2026.07 collector.
+
+A version marks a **release**, not a commit — cut one only when the toolkit
+leaves this repo (a real review, or handing it to someone for a bastion).
+Between releases, changes accumulate under `[Unreleased]` in `CHANGELOG.md`.
+
+Release procedure:
+
+1. Bump `TOOLKIT_VERSION` in `collect-ocp-review.sh` and `ocp_analyzer.py`
+   (and `BUILD_KNOWLEDGE_DATE` if the baked-in facts were refreshed —
+   normally yes).
+2. Rename `[Unreleased]` in `CHANGELOG.md` to the version + date; start a
+   fresh `[Unreleased]`.
+3. `git tag v<version>` on the release commit.
+
 ## Related projects
 
 If this toolkit is useful to you, you may also be interested in:
