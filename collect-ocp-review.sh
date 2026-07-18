@@ -30,7 +30,7 @@ set -uo pipefail
 # Toolkit release (CalVer YYYY.MM[.patch]) and bundle layout format.
 # BUNDLE_FORMAT only changes when files are renamed/removed or their layout
 # changes incompatibly - NOT when new collection lines are added.
-TOOLKIT_VERSION="2026.07"
+TOOLKIT_VERSION="2026.07.1"
 BUNDLE_FORMAT=2
 
 SANITIZE=0

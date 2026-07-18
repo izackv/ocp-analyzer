@@ -35,7 +35,7 @@ SEV_ORDER = ["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"]
 # Toolkit release (CalVer YYYY.MM[.patch]); released together with
 # collect-ocp-review.sh, which stamps the same values into 00-meta.txt.
 # BUNDLE_FORMAT is the newest bundle layout this analyzer understands.
-TOOLKIT_VERSION = "2026.07"
+TOOLKIT_VERSION = "2026.07.1"
 BUNDLE_FORMAT = 2
 
 # Static knowledge baked in at build time - verify against current Red Hat docs.

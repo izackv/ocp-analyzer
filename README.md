@@ -48,17 +48,24 @@ No cluster or internet access needed:
 
 ```bash
 python3 ocp_analyzer.py ocp-review_prod_20260705-090000
-#   -> ocp-review_prod_20260705-090000-analysis/{architecture-overview,issues,manual-review-guide}.md
+#   -> ocp-review_prod_20260705-090000-analysis/{architecture-overview,issues,attention-points,manual-review-guide}.md + findings.json
 ```
 
 ### Analyze the data with AI
 
 Likewise runs wherever the bundle is, in-place or transferred (details in
-"The Claude Code skill" below):
+"The Claude Code skill" below). Install the skill once, either for your
+user (all projects) or into the folder holding the evidence:
 
 ```bash
-cp -r skills/ocp-bundle-review ~/.claude/skills/   # install the skill (once)
-# then, in a Claude Code session in the directory holding the bundle:
+cp -r skills/ocp-bundle-review ~/.claude/skills/                # user-wide
+cp -r skills/ocp-bundle-review <data-folder>/.claude/skills/    # this data folder only
+```
+
+Then `cd` into the directory holding the bundle, open a Claude Code
+session (`claude`), and run:
+
+```
 /ocp-bundle-review
 ```
 
@@ -236,8 +243,8 @@ cp -r skills/ocp-bundle-review ~/.claude/skills/          # personal, all projec
 cp -r skills/ocp-bundle-review <project>/.claude/skills/  # this project only
 ```
 
-Then, in a Claude Code session in the directory holding the bundle (and the
-TSR PDF, if you have one):
+Then `cd` into the directory holding the bundle (and the TSR PDF, if you
+have one), open a Claude Code session (`claude`), and run:
 
 ```
 /ocp-bundle-review
@@ -249,6 +256,23 @@ Claude to produce the same three documents as a full manual review:
 Source/Evidence/Risk/Mitigation and a TSR-mapping appendix when a TSR is
 present), and `<cluster>-attention-points.md` (discrepancies, unverifiable
 findings, questions for the customer).
+
+### Using other agents / local models
+
+The skill is plain markdown instructions plus files on disk — nothing in it
+is Claude-specific. With any coding agent that can read files and run shell
+commands (opencode, aider, goose, ...), `cd` into the bundle directory and
+prompt:
+
+> Read `<repo>/skills/ocp-bundle-review/SKILL.md` and perform the review it
+> describes on the bundle in this directory.
+
+Model quality matters more than the agent: the review needs long-context,
+multi-file correlation with disciplined evidence citation. Hosted frontier
+models handle it; local models (vLLM/Ollama on a DGX, Ollama/MLX on Apple
+Silicon) vary — validate a local setup by comparing its output against
+`ocp_analyzer.py` and a known-good review before trusting it, and treat the
+deterministic analyzer as the floor either way.
 
 ## Tests
 

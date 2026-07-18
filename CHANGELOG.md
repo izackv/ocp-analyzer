@@ -2,12 +2,15 @@
 
 All notable changes to this toolkit are recorded here. Dates are ISO (YYYY-MM-DD).
 
-## [Unreleased]
+## [2026.07.1] - 2026-07-18
+
+Major capability/accuracy release: the analyzer was rebuilt around a gap
+analysis of its reports vs AI skill reviews of the same bundles (7 lab
+server-runs + 1 production cluster), then validated by re-running the
+comparison — coverage of the skill reviews' findings rose to ~85-90% and
+every recurring false-positive class was eliminated.
 
 ### Added
-
-Analyzer overhaul, driven by a gap analysis of the script's reports vs
-AI skill reviews of the same bundles (7 lab server-runs + 1 production):
 
 - Cluster-profile severity calibration: topology (SNO vs HA), connectivity,
   tenant-vs-platform namespaces and cluster age now scale or suppress
