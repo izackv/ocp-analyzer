@@ -79,7 +79,8 @@ AUTOROTATED_ISSUER_RE = re.compile(
     r"kube-apiserver|kube-control-plane-signer|kube-csr-signer|csr-signer|"
     r"aggregator|service-ca|ingress-operator|node-system-admin|"
     r"loadbalancer-serving|localhost-serving|service-network-serving", re.I)
-PLATFORM_NS_RE = re.compile(r"^(openshift($|-)|kube-|default$)")
+PLATFORM_NS_RE = re.compile(
+    r"^(openshift($|-)|kube-|default$|assisted-installer$)")
 
 # per-file collection status (tri-state semantics for .err / empty files)
 S_OK = "ok"                        # file present with content
@@ -88,6 +89,148 @@ S_MISSING = "missing"              # not collected (older collector?)
 S_ERR_ABSENT = "verified-absent"   # .err: resource type not on the cluster
 S_ERR_NOTFOUND = "not-configured"  # .err: named object absent = defaults
 S_ERR_FAILED = "collection-failed" # .err: request failed = data UNKNOWN
+
+# file -> collecting command (evidence citations); generated from
+# collect-ocp-review.sh - regenerate when the collector changes.
+FILE_COMMANDS = {
+    "01-apiserver.yaml": "oc get apiserver cluster -o yaml",
+    "01-clusteroperators.txt": "oc get clusteroperators",
+    "01-clusteroperators.yaml": "oc get clusteroperators -o yaml",
+    "01-clusterversion.yaml": "oc get clusterversion -o yaml",
+    "01-dns.yaml": "oc get dns.config cluster -o yaml",
+    "01-etcd-cr.yaml": "oc get etcd cluster -o yaml",
+    "01-etcd-readyz.txt": "oc get --request-timeout=20s --raw '/readyz?verbose'",
+    "01-featuregate.yaml": "oc get featuregate cluster -o yaml",
+    "01-infrastructure.yaml": "oc get infrastructure cluster -o yaml",
+    "01-ingress-config.yaml": "oc get ingress.config cluster -o yaml",
+    "01-mirrors-icsp.yaml": "oc get imagecontentsourcepolicy -o yaml",
+    "01-mirrors-idms.yaml": "oc get imagedigestmirrorset -o yaml",
+    "01-mirrors-itms.yaml": "oc get imagetagmirrorset -o yaml",
+    "01-operatorhub.yaml": "oc get operatorhub cluster -o yaml",
+    "01-proxy.yaml": "oc get proxy cluster -o yaml",
+    "01-upgrade.txt": "oc adm upgrade",
+    "01-version.txt": "oc version",
+    "02-autoscalers.txt": "oc get clusterautoscaler,machineautoscaler -A",
+    "02-containerruntimeconfig.yaml": "oc get containerruntimeconfig -o yaml",
+    "02-csr.txt": "oc get csr",
+    "02-kubeletconfig.yaml": "oc get kubeletconfig -o yaml",
+    "02-machineconfigs.txt": "oc get machineconfig",
+    "02-machines.txt": "oc get machines -n openshift-machine-api -o wide",
+    "02-machinesets.txt": "oc get machineset -n openshift-machine-api",
+    "02-mcp.txt": "oc get machineconfigpool",
+    "02-nodes-capacity.txt": "oc get nodes -o custom-columns=...",
+    "02-nodes-conditions.txt": "oc get nodes -o 'custom-columns=NAME:.metadata.name,READY:.status.conditions[?(@.type=='Ready')].status,MEM-PRESSURE:.status.conditions[?(@.type=='MemoryPressure')].status,DISK-PRESSURE:.status.conditions[?(@.type=='DiskPressure')].status,PID-PRESSURE:.status.conditions[?(@.type=='PIDPressure')].status,NET-UNAVAIL:.status.conditions[?(@.type=='NetworkUnavailable')].status,TAINTS:.spec.taints[*].key'",
+    "02-nodes-roles-zones.txt": "oc get nodes -L <labels>",
+    "02-nodes-wide.txt": "oc get nodes -o wide",
+    "02-top-nodes.txt": "oc adm top nodes",
+    "02-tuned.txt": "oc get tuned -n openshift-cluster-node-tuning-operator",
+    "03-anp-banp.txt": "oc get adminnetworkpolicy,baselineadminnetworkpolicy",
+    "03-egressfirewall.txt": "oc get egressfirewall -A",
+    "03-egressips.txt": "oc get egressip",
+    "03-ingress-svc.txt": "oc get svc -n openshift-ingress",
+    "03-ingresscontroller.yaml": "oc get ingresscontroller -n openshift-ingress-operator -o yaml",
+    "03-metallb.txt": "oc get ipaddresspools,l2advertisements,bgpadvertisements -A",
+    "03-net-attach-def.txt": "oc get network-attachment-definitions -A",
+    "03-network-config.yaml": "oc get network.config cluster -o yaml",
+    "03-network-operator.yaml": "oc get network.operator cluster -o yaml",
+    "03-networkpolicy.txt": "oc get networkpolicy -A",
+    "03-nnce.txt": "oc get nnce",
+    "03-nncp.yaml": "oc get nncp -o yaml",
+    "03-ovnkube-pods.txt": "oc get pods -n openshift-ovn-kubernetes -o wide",
+    "03-routes.txt": "oc get routes -A",
+    "03-services-all.txt": "oc get svc -A",
+    "03-sriov.txt": "oc get sriovnetworknodepolicy,sriovnetwork -A",
+    "03-whereabouts-ippools.yaml": "oc get ippools -A -o yaml",
+    "03-whereabouts-overlap.txt": "oc get overlappingrangeipreservations -A",
+    "04-cephblockpool.txt": "oc get cephblockpool -n openshift-storage",
+    "04-cephcluster.txt": "oc get cephcluster -n openshift-storage",
+    "04-cephfilesystem.txt": "oc get cephfilesystem -n openshift-storage",
+    "04-csidrivers.txt": "oc get csidrivers",
+    "04-imagepruner.yaml": "oc get imagepruner cluster -o yaml",
+    "04-localvolume.yaml": "oc get localvolume -n openshift-local-storage -o yaml",
+    "04-noobaa.txt": "oc get noobaa -n openshift-storage",
+    "04-obc.txt": "oc get objectbucketclaim -A",
+    "04-pv.txt": "oc get pv",
+    "04-pvc.txt": "oc get pvc -A",
+    "04-storageclasses.txt": "oc get sc -o custom-columns=...",
+    "04-storagecluster.txt": "oc get storagecluster -n openshift-storage",
+    "04-storagecluster.yaml": "oc get storagecluster -n openshift-storage -o yaml",
+    "04-trident.txt": "oc get tridentbackendconfig -A",
+    "04-volumesnapshotclass.txt": "oc get volumesnapshotclass",
+    "04-volumesnapshots.txt": "oc get volumesnapshot -A",
+    "05-catalogsource.txt": "oc get catalogsource -A",
+    "05-crd-count.txt": "oc get crd -o custom-columns=...",
+    "05-csv.txt": "oc get csv -A",
+    "05-installplan.txt": "oc get installplan -A",
+    "05-operatorgroup.txt": "oc get operatorgroup -A",
+    "05-subscriptions.txt": "oc get subscriptions.operators.coreos.com -A -o custom-columns=...",
+    "06-clusterresourcequota.txt": "oc get clusterresourcequota",
+    "06-daemonsets-status.txt": "oc get daemonset -A -o custom-columns=...",
+    "06-hpa.txt": "oc get hpa -A",
+    "06-jobs.txt": "oc get jobs -A",
+    "06-limitrange.txt": "oc get limitrange -A",
+    "06-pdb.txt": "oc get pdb -A -o custom-columns=...",
+    "06-pods-all.txt": "oc get pods -A -o wide",
+    "06-priorityclasses.txt": "oc get priorityclasses",
+    "06-projects.txt": "oc get projects",
+    "06-resourcequota.txt": "oc get resourcequota -A",
+    "06-top-pods.txt": "oc adm top pods -A --sum",
+    "06-workloads-status.txt": "oc get deploy,statefulset -A -o custom-columns=...",
+    "06-workloads.txt": "oc get deploy,statefulset,daemonset -A",
+    "07-acm-policies.txt": "oc get policies.policy.open-cluster-management.io -A",
+    "07-acs-central.txt": "oc get central -A",
+    "07-acs-secured.txt": "oc get securedcluster -A",
+    "07-cert-expiry.txt": "oc get secret -A -o custom-columns=...",
+    "07-certificates.txt": "oc get certificates.cert-manager.io -A",
+    "07-clusterrolebindings.txt": "oc get clusterrolebinding -o wide",
+    "07-compliance.txt": "oc get compliancesuite,compliancescan -A",
+    "07-etcd-encryption.txt": "oc get apiserver cluster -o jsonpath=...",
+    "07-groups.txt": "oc get groups",
+    "07-identities.txt": "oc get identity",
+    "07-imageregistry.yaml": "oc get configs.imageregistry.operator.openshift.io cluster -o yaml",
+    "07-kubeadmin-exists.txt": "oc get secret kubeadmin -n kube-system -o name",
+    "07-oauth.yaml": "oc get oauth cluster -o yaml",
+    "07-oauthclients.txt": "oc get oauthclients -o custom-columns=...",
+    "07-registry-route.txt": "oc get route -n openshift-image-registry",
+    "07-rolebindings.txt": "oc get rolebindings -A -o wide",
+    "07-scc.txt": "oc get scc",
+    "07-scc.yaml": "oc get scc -o yaml",
+    "07-users.txt": "oc get user",
+    "07-webhooks.txt": "oc get mutatingwebhookconfiguration,validatingwebhookconfiguration -o custom-columns=...",
+    "08-active-alerts.json": "oc get --request-timeout=20s --raw '/api/v1/namespaces/openshift-monitoring/services/alertmanager-main:9094/proxy/api/v2/alerts?active=true'",
+    "08-alertmanagerconfig.txt": "oc get alertmanagerconfig -A",
+    "08-cluster-monitoring.yaml": "oc get configmap cluster-monitoring-config -n openshift-monitoring -o yaml",
+    "08-clusterlogging.txt": "oc get clusterlogging,clusterlogforwarder -n openshift-logging",
+    "08-clusterlogging.yaml": "oc get clusterlogging,clusterlogforwarder -n openshift-logging -o yaml",
+    "08-lokistack.txt": "oc get lokistack -A",
+    "08-prom-am.txt": "oc get prometheus,alertmanager -n openshift-monitoring",
+    "08-prometheusrules.txt": "oc get prometheusrule -A",
+    "08-uwm.yaml": "oc get configmap user-workload-monitoring-config -n openshift-user-workload-monitoring -o yaml",
+    "09-applications.txt": "oc get applications.argoproj.io -A",
+    "09-applicationsets.txt": "oc get applicationsets.argoproj.io -A",
+    "09-appprojects.txt": "oc get appprojects.argoproj.io -A",
+    "09-argocd.txt": "oc get argocd -A",
+    "09-tektonconfig.txt": "oc get tektonconfig",
+    "10-backup-locations.txt": "oc get backupstoragelocation,volumesnapshotlocation -A",
+    "10-cronjobs.txt": "oc get cronjob -A",
+    "10-etcd-backup-fg.txt": "oc get featuregate cluster -o jsonpath=...",
+    "10-kasten-policies.txt": "oc get policies.config.kio.kasten.io -A",
+    "10-oadp-dpa.txt": "oc get dataprotectionapplication -A",
+    "10-velero-crs.txt": "oc get backup,restore,schedule -A",
+    "11-events-warning.txt": "oc get events -A --field-selector type=Warning --sort-by=.lastTimestamp",
+    "12-clusterpolicy.yaml": "oc get clusterpolicy -A -o yaml",
+    "12-gpu-capacity.txt": "oc get nodes -o custom-columns=...",
+    "12-gpu-consumers.txt": "oc get pods -A -o custom-columns=...",
+    "12-gpu-node-labels.txt": "oc get nodes -L <labels>",
+    "12-gpu-operator-pods.txt": "oc get pods -n nvidia-gpu-operator -o wide",
+    "12-nfd.txt": "oc get nodefeaturediscovery -A",
+    "12-nicclusterpolicy.yaml": "oc get nicclusterpolicy -A -o yaml",
+    "12-nv-network-pods.txt": "oc get pods -n nvidia-network-operator -o wide",
+    "12-nvidia-networks.txt": "oc get macvlannetwork,hostdevicenetwork,ipoibnetwork -A",
+    "12-performanceprofile.yaml": "oc get performanceprofile -o yaml",
+    "12-sriov-node-state.txt": "oc get sriovnetworknodestate -n openshift-sriov-network-operator",
+}
+
 
 
 # --------------------------------------------------------------------------- #
@@ -252,6 +395,16 @@ def parse_conditions(text, all_blocks=False):
     return conds
 
 
+def parse_named_conditions(text):
+    """{metadata.name: [condition dicts]} for every item of a List YAML."""
+    out = {}
+    for chunk in re.split(r"^- apiVersion:", text or "", flags=re.M)[1:]:
+        name = yaml_grab(yaml_block(chunk, "metadata") or chunk, "name")
+        if name:
+            out[name] = parse_conditions(chunk)
+    return out
+
+
 def parse_iso_time(s):
     try:
         return datetime.strptime((s or "").strip('"'), "%Y-%m-%dT%H:%M:%SZ")
@@ -276,12 +429,13 @@ class Profile(object):
         self.infra_topology = yaml_grab(infra, "infrastructureTopology") or "?"
         self.sno = self.cp_topology == "SingleReplica"
         cv = bundle.read("01-clusterversion.yaml") or ""
-        # a mirrors FILE always exists; only actual mirror entries count
+        # disconnected ONLY when the cluster provably cannot reach the
+        # update graph; mirror entries alone also occur on connected
+        # appliance-style installs
         mirrors = ((bundle.read("01-mirrors-idms.yaml") or "")
                    + (bundle.read("01-mirrors-icsp.yaml") or ""))
-        self.disconnected = bool(
-            re.search(r"reason:\s*RemoteFailed", cv)
-            or "mirrors:" in mirrors)
+        self.mirrored = "mirrors:" in mirrors
+        self.disconnected = bool(re.search(r"reason:\s*RemoteFailed", cv))
         names = [l.split()[0] for l in bundle.lines("06-projects.txt")
                  if l.split()]
         self.tenant_namespaces = [n for n in names
@@ -301,7 +455,9 @@ class Profile(object):
                          "single-replica findings inherent to SNO are "
                          "suppressed or downgraded")
         parts.append("connectivity: %s" %
-                     ("disconnected/mirrored" if self.disconnected
+                     ("disconnected (cannot reach update graph)"
+                      if self.disconnected else
+                      "connected, image mirrors configured" if self.mirrored
                       else "connected (no mirror/proxy signals)"))
         parts.append("tenant namespaces: %d of %d"
                      % (len(self.tenant_namespaces), self.namespace_count))
@@ -318,6 +474,10 @@ class Analyzer(object):
         self.findings = []        # list of dicts
         self.suppressed = []      # (title, reason) dropped by calibration
         self.facts = {}           # for the overview
+        self.outage_nodes = set() # NotReady nodes -> downstream cascade tags
+        self.greens = []          # (area, statement) verified-healthy ledger
+        self.questions = []       # customer questions harvested from findings
+        self._check = "?"         # current check name (stamped into rule ids)
         self.assumptions = [
             "YAML files are mined with regular expressions (Python stdlib has "
             "no YAML parser); deeply nested or unusually formatted manifests "
@@ -334,16 +494,29 @@ class Analyzer(object):
         ]
 
     # ---- finding helpers ---------------------------------------------------
-    def add(self, sev, area, title, evidence, risk, rec, assumption=None):
+    def add(self, sev, area, title, evidence, risk, rec, assumption=None,
+            cascade=False, question=None):
+        # stable rule id: check name + title with counts normalized - the
+        # cross-run diff (--prev) matches findings on this
+        rid = "%s/%s" % (self._check.replace("check_", ""),
+                         re.sub(r"[^a-z0-9]+", "-",
+                                re.sub(r"\d+", "N", title.lower())).strip("-"))
         self.findings.append({
-            "sev": sev, "area": area, "title": title,
+            "id": rid, "sev": sev, "area": area, "title": title,
             "evidence": evidence, "risk": risk, "rec": rec,
             "assumption": assumption,
+            "cascade": cascade and bool(self.outage_nodes),
         })
+        if question:
+            self.questions.append(question)
 
     def suppress(self, title, reason):
         """Record a finding dropped by profile calibration (auditable)."""
         self.suppressed.append((title, reason))
+
+    def green(self, area, statement):
+        """Record a verified-healthy assertion (positive evidence ledger)."""
+        self.greens.append((area, statement))
 
     # ---- individual checks -------------------------------------------------
     def check_meta(self):
@@ -477,22 +650,45 @@ class Analyzer(object):
 
     def check_clusteroperators(self):
         rows = self.b.lines("01-clusteroperators.txt")
+        # per-CO condition reason/message from the YAML - the root-cause
+        # lead usually sits in the Degraded/Available message text
+        conds = parse_named_conditions(
+            self.b.read("01-clusteroperators.yaml") or "")
         bad = []
         for line in rows:
             tok = line.split()
             if len(tok) >= 5 and (tok[2] != "True" or tok[3] != "False" or tok[4] != "False"):
-                bad.append("%s (A=%s P=%s D=%s)" % (tok[0], tok[2], tok[3], tok[4]))
+                why = ""
+                for c in conds.get(tok[0], []):
+                    if (c.get("type") == "Degraded" and c.get("status") == "True") \
+                            or (c.get("type") == "Available"
+                                and c.get("status") == "False"):
+                        why = " - %s: %s" % (c.get("reason", "?"),
+                                             (c.get("message") or "")[:160])
+                        break
+                bad.append("%s (A=%s P=%s D=%s)%s"
+                           % (tok[0], tok[2], tok[3], tok[4], why))
         self.facts["cluster_operators"] = len(rows)
+        self.facts["bad_cos"] = {b.split()[0] for b in bad}
+        if rows and not bad:
+            self.green("Stability", "All %d cluster operators Available, not Progressing, not Degraded (01-clusteroperators.txt)." % len(rows))
         if bad:
-            self.add("CRITICAL", "Stability",
+            core = ("authentication", "etcd", "kube-apiserver",
+                    "kube-controller-manager", "kube-scheduler", "network",
+                    "dns", "openshift-apiserver", "machine-config")
+            # a lone degraded NON-core operator (e.g. image-registry over a
+            # failed pruner job) is HIGH; core operators stay CRITICAL
+            sev = "HIGH" if (len(bad) == 1 and not self.outage_nodes
+                             and not bad[0].startswith(core)) else "CRITICAL"
+            self.add(sev, "Stability",
                      "%d cluster operator(s) unavailable/degraded/progressing" % len(bad),
-                     "01-clusteroperators.txt: " + "; ".join(bad[:8]) +
-                     ("..." if len(bad) > 8 else ""),
+                     "01-clusteroperators.txt + 01-clusteroperators.yaml: "
+                     + "; ".join(bad[:8]) + ("..." if len(bad) > 8 else ""),
                      "Degraded core operators mean platform functions are "
                      "impaired right now.",
-                     "Inspect the operators' conditions in "
-                     "01-clusteroperators.yaml and remediate before anything "
-                     "else.")
+                     "Follow the condition message(s) above to the failing "
+                     "component and remediate before anything else.",
+                     cascade=True)
 
     def check_nodes(self):
         rows = self.b.lines("02-nodes-wide.txt")
@@ -508,14 +704,35 @@ class Analyzer(object):
                 notready.append("%s (%s)" % (tok[0], tok[1]))
         self.facts["nodes_by_role"] = {r: len(v) for r, v in roles.items()}
         self.facts["node_count"] = sum(len(v) for v in roles.values())
+        if rows and not notready:
+            self.green("Stability", "All %d nodes Ready (02-nodes-wide.txt)." % len(rows))
         if notready:
+            self.outage_nodes = {n.split()[0] for n in notready}
+            # READY=Unknown means the kubelet stopped REPORTING (node
+            # unreachable), not a failed health check - different diagnosis
+            unknown = [l.split()[0] for l in
+                       self.b.lines("02-nodes-conditions.txt")
+                       if len(l.split()) > 1 and l.split()[1] == "Unknown"]
+            unmanaged = any(l.split()[-1] == "unmanaged"
+                            for l in self.b.lines("02-machines.txt")
+                            if l.split())
             self.add("CRITICAL", "Stability",
-                     "%d node(s) not Ready" % len(notready),
-                     "02-nodes-wide.txt: " + ", ".join(notready[:6]),
-                     "Reduced capacity/redundancy; workloads may be pending or "
-                     "rescheduled.",
-                     "Investigate kubelet/network/storage on the affected "
-                     "nodes.")
+                     "%d node(s) not Ready - treat dependent findings as one "
+                     "incident" % len(notready),
+                     "02-nodes-wide.txt: " + ", ".join(notready[:6])
+                     + (". 02-nodes-conditions.txt: Ready=Unknown on %s - "
+                        "the kubelet stopped reporting (node unreachable), "
+                        "not a failed health probe."
+                        % ", ".join(unknown[:6]) if unknown else "")
+                     + (" 02-machines.txt: Machines are 'unmanaged' "
+                        "(bare-metal) - the Machine API cannot auto-remediate;"
+                        " recovery is manual." if unmanaged else ""),
+                     "Reduced capacity/redundancy; degraded operators, "
+                     "under-replicated workloads, stuck rollouts and pending "
+                     "pods below are most likely CASCADE EFFECTS of this "
+                     "outage, not independent problems.",
+                     "Recover the nodes first (power/network/kubelet), then "
+                     "re-collect and re-assess whatever findings remain.")
         # master sizing - masters identified by their ROLES column, with a
         # hostname fallback for older bundles; thresholds depend on topology
         masters = {n for r, nodes in roles.items() for n in nodes
@@ -565,20 +782,41 @@ class Analyzer(object):
                 elif cpu_pct.isdigit() and int(cpu_pct) >= 80:
                     hot.append("%s cpu=%s%%" % (tok[0], cpu_pct))
         if hot:
+            # name the top memory consumers so the finding is actionable
+            top_pods = []
+            for line in self.b.lines("06-top-pods.txt"):
+                tok = line.split()
+                if len(tok) >= 4 and tok[3].endswith("Mi"):
+                    try:
+                        top_pods.append((int(tok[3][:-2]),
+                                         "%s/%s" % (tok[0], tok[1])))
+                    except ValueError:
+                        pass
+            top_pods.sort(reverse=True)
+            attribution = ("; top memory consumers (06-top-pods.txt): "
+                           + ", ".join("%s %dMi" % (n, m)
+                                       for m, n in top_pods[:5])
+                           if top_pods else "")
             self.add("MEDIUM", "Capacity",
                      "%d node(s) above utilization thresholds at collection time" % len(hot),
-                     "02-top-nodes.txt: " + "; ".join(hot[:8]),
+                     "02-top-nodes.txt: " + "; ".join(hot[:8]) + attribution,
                      "Nodes near memory limits risk OOM/eviction storms; on "
                      "masters this endangers etcd.",
-                     "Check trends in Prometheus; rebalance workloads, raise "
+                     "Check trends in Prometheus; rebalance workloads or "
+                     "reclaim platform overhead (top consumers above), raise "
                      "systemReserved, or add capacity.",
                      assumption="Thresholds: memory >=70%, CPU >=80% at the "
-                                "single point of collection.")
+                                "single point of collection. Top consumers "
+                                "are cluster-wide (pod-to-node mapping is "
+                                "not in the top-pods output).")
 
     def check_mcp(self):
-        for line in self.b.lines("02-mcp.txt"):
+        mcp_rows = self.b.lines("02-mcp.txt")
+        bad_mcp = False
+        for line in mcp_rows:
             tok = line.split()
             if len(tok) >= 5 and (tok[2] != "True" or tok[3] != "False" or tok[4] != "False"):
+                bad_mcp = True
                 self.add("HIGH", "Stability",
                          "MachineConfigPool '%s' not converged" % tok[0],
                          "02-mcp.txt: UPDATED=%s UPDATING=%s DEGRADED=%s."
@@ -586,7 +824,10 @@ class Analyzer(object):
                          "Nodes are mid-rollout or stuck; upgrades and config "
                          "changes will not complete.",
                          "`oc describe mcp %s` and check nodes' "
-                         "machineconfiguration annotations." % tok[0])
+                         "machineconfiguration annotations." % tok[0],
+                         cascade=True)
+        if mcp_rows and not bad_mcp:
+            self.green("Stability", "All MachineConfigPools converged (02-mcp.txt).")
 
     def check_pods(self):
         rows = self.b.lines("06-pods-all.txt")
@@ -606,7 +847,9 @@ class Analyzer(object):
                 else:
                     status_count[status] = status_count.get(status, 0) + 1
             if "ImagePull" in status or "ErrImage" in status:
-                pull_fail.append("%s/%s" % (ns, name))
+                pull_fail.append(("%s/%s" % (ns, name),
+                                  parse_age_days(tok[5]) if len(tok) > 5
+                                  else 0.0))
             if tok[4].isdigit() and int(tok[4]) > 0:
                 # RESTARTS may be "5 (3d14h ago)" - recency in tok[5..6];
                 # AGE is the column after the optional recency
@@ -621,7 +864,10 @@ class Analyzer(object):
                     restarts.append((count, "%s/%s" % (ns, name), status,
                                      recent, rate))
         self.facts["pod_total"] = len(rows)
-        self.facts["pod_not_running"] = status_count
+        self.facts["pod_not_running"] = dict(status_count)
+        if one_shot:
+            self.facts["pod_not_running"]["Error (benign one-shot "
+                                          "installer/pruner)"] = one_shot
         if restarts:
             restarts.sort(reverse=True)
             top = ["%s restarts=%d (%s%s, ~%.1f/day)"
@@ -634,23 +880,45 @@ class Analyzer(object):
                      "incidents and indicate unhealthy applications.",
                      "Triage with the app owners; fix or remove the top "
                      "offenders.",
+                     cascade=True,
                      assumption="Flagged at >=100 total restarts OR a rate "
                                 ">=10/day with >=20 restarts (restart count "
                                 "normalized by pod age - a steady trickle "
                                 "over years is different from an active "
                                 "crash loop).")
         if pull_fail:
+            # age stratification separates chronic debt from an ACTIVE
+            # regression (e.g. images freshly removed from the mirror)
+            chronic = [n for n, d in pull_fail if d >= 30]
+            fresh = [n for n, d in pull_fail if d < 7]
+            strata = []
+            if chronic:
+                strata.append("%d chronic (>=30d old)" % len(chronic))
+            if fresh:
+                strata.append("%d RECENT (<7d - active regression?)"
+                              % len(fresh))
             self.add("HIGH", "Workloads",
-                     "%d pod(s) failing image pulls" % len(pull_fail),
-                     "06-pods-all.txt: " + ", ".join(pull_fail[:8]) +
+                     "%d pod(s) failing image pulls%s"
+                     % (len(pull_fail),
+                        " - " + ", ".join(strata) if strata else ""),
+                     "06-pods-all.txt: " +
+                     ", ".join(n for n, _ in pull_fail[:8]) +
                      ("..." if len(pull_fail) > 8 else ""),
                      "Services run below intended replicas AND the images are "
                      "not pullable - a redeploy or node failure would not "
-                     "recover these workloads. On disconnected clusters this "
-                     "usually means images were removed from the mirror "
-                     "registry.",
-                     "Audit the mirror registry for the missing tags; fix or "
-                     "remove dead references.")
+                     "recover these workloads."
+                     + (" On this disconnected cluster that points at "
+                        "MIRROR-REGISTRY DRIFT: the running copies are "
+                        "unrecoverable after any restart, which is also a "
+                        "DR gap; recent failures suggest the drift is still "
+                        "happening." if self.profile.disconnected else ""),
+                     "Audit the source registry/mirror for the missing tags; "
+                     "fix or remove dead references"
+                     + ("; reconcile the mirroring pipeline."
+                        if self.profile.disconnected else "."),
+                     assumption="Failure age approximated by pod AGE (the "
+                                "pod has been failing to pull since it was "
+                                "created).")
         crash = status_count.get("CrashLoopBackOff", 0)
         errors = status_count.get("Error", 0)
         if crash or errors:
@@ -692,17 +960,24 @@ class Analyzer(object):
                 backup_ns.add(tok[0])
         if backup_ns:
             pods = self.b.lines("06-pods-all.txt")
-            bad, ok_age = [], None
+            bad, ok_age, worst_err = [], None, 0.0
             for line in pods:
                 tok = line.split()
                 if len(tok) >= 5 and tok[0] in backup_ns:
+                    age = tok[7] if len(tok) > 7 and tok[5].startswith("(") \
+                        else (tok[5] if len(tok) > 5 else "")
+                    d = parse_age_days(age)
                     if tok[3] == "Error":
                         bad.append("%s/%s" % (tok[0], tok[1]))
+                        worst_err = max(worst_err, d)
                     elif tok[3] == "Completed":
-                        age = tok[7] if tok[5].startswith("(") and len(tok) > 7 else tok[5]
-                        d = parse_age_days(age)
                         ok_age = d if ok_age is None else min(ok_age, d)
             if bad:
+                # Job history limits cap retained pods: the observable span
+                # is a LOWER BOUND on how long this has been failing
+                window = worst_err if (ok_age is None or worst_err < ok_age) \
+                    else ok_age
+                self.facts["unnoticed_failure_days"] = window
                 self.add("CRITICAL", "Backup/DR",
                          "Backup job pods are failing (namespace(s): %s)"
                          % ", ".join(sorted(backup_ns)),
@@ -710,7 +985,11 @@ class Analyzer(object):
                          + ", ".join(bad[:6]) +
                          ("; most recent Completed backup pod is ~%.0f days old"
                           % ok_age if ok_age is not None else
-                          "; NO Completed backup pod visible"),
+                          "; NO Completed backup pod visible")
+                         + ("; failing for AT LEAST ~%.0f days (only the "
+                            "job-history-limit's worth of pods is retained, "
+                            "so the real window may be longer)" % window
+                            if window >= 1 else ""),
                          "If these are etcd/cluster backups, there may be no "
                          "usable restore point.",
                          "Read the failing job logs, fix, verify the backup "
@@ -737,7 +1016,8 @@ class Analyzer(object):
             fg = self.b.read("10-etcd-backup-fg.txt") or \
                 self.b.read("01-featuregate.yaml") or ""
             no_fg = "AutomatedEtcdBackup" not in fg
-            sev = "CRITICAL" if self.profile.sno else "HIGH"
+            # CRITICAL only when stateful data actually exists to lose
+            sev = "CRITICAL" if self.b.lines("04-pv.txt") else "HIGH"
             self.add(sev, "Backup/DR",
                      "No backup tooling detected on the cluster",
                      "10-*: no OADP DataProtectionApplication, no Velero CRs, "
@@ -758,7 +1038,10 @@ class Analyzer(object):
                         "and schedule it." if self.profile.sno else ""),
                      assumption="Backup products visible only via their "
                                 "cluster CRs; external/agent-based backup "
-                                "cannot be detected from this bundle.")
+                                "cannot be detected from this bundle.",
+                     question="How is this cluster backed up (external agents "
+                              "are invisible to the bundle)? When was a "
+                              "restore last TESTED?")
 
     def check_storage(self):
         pvs = self.b.lines("04-pv.txt")
@@ -796,28 +1079,120 @@ class Analyzer(object):
                      "Ambiguous default; PVC placement becomes "
                      "non-deterministic.",
                      "Keep a single default class.")
-        # databases / ES on CephFS or other file storage
+        # StorageClass risk classification: provisioner type x workload x
+        # backup posture composes into data-loss findings
+        sc_info = {}   # name -> (provisioner, reclaim)
+        for r in sc_rows:
+            tok = r.split()
+            if len(tok) >= 3:
+                sc_info[tok[0]] = (tok[1].lower(), tok[2])
+        file_re = re.compile(r"cephfs|nfs|azurefile|efs\.|filestore")
+        local_re = re.compile(r"topolvm|lvms|local\.storage|no-provisioner|"
+                              r"rancher\.io/local-path|hostpath")
         db_re = re.compile(r"postgres|pgsql|\bpg\b|mysql|maria|mongo|oracle|"
-                           r"mssql|redis|kafka|etcd|elastic|opensearch", re.I)
-        offenders = []
+                           r"mssql|redis|kafka|etcd|elastic|opensearch|"
+                           r"keycloak|(^|[-_])db([-_\d]|$)|database", re.I)
+        pvc_total = 0
+        on_file, on_local = [], []
         for line in self.b.lines("04-pvc.txt"):
             tok = line.split()
-            if len(tok) >= 7 and "cephfs" in tok[6].lower():
-                if db_re.search(tok[0]) or db_re.search(tok[1]):
-                    offenders.append("%s/%s (%s, %s)" % (tok[0], tok[1], tok[4], tok[6]))
-        if offenders:
+            if len(tok) < 7:
+                continue
+            pvc_total += 1
+            sc = tok[6]
+            prov, reclaim = sc_info.get(sc, (sc.lower(), "?"))
+            if not (db_re.search(tok[0]) or db_re.search(tok[1])):
+                continue
+            entry = "%s/%s (%s, %s)" % (tok[0], tok[1], tok[4], sc)
+            if file_re.search(prov) or file_re.search(sc.lower()):
+                on_file.append(entry)
+            elif local_re.search(prov):
+                on_local.append(entry + (", reclaim=Delete"
+                                         if reclaim == "Delete" else ""))
+        if on_file:
             self.add("CRITICAL", "Storage",
-                     "Database/Elasticsearch-looking PVCs on CephFS (file storage)",
-                     "04-pvc.txt: " + "; ".join(offenders[:8]) +
-                     ("... (%d total)" % len(offenders) if len(offenders) > 8 else ""),
-                     "Red Hat does not support databases on CephFS; heavy "
-                     "metadata I/O can degrade CephFS for ALL applications, "
+                     "Database/Elasticsearch-looking PVCs on file storage "
+                     "(CephFS/NFS-class)",
+                     "04-pvc.txt: " + "; ".join(on_file[:8]) +
+                     ("... (%d total)" % len(on_file) if len(on_file) > 8 else ""),
+                     "Red Hat does not support databases on file storage; "
+                     "heavy metadata I/O can degrade it for ALL applications, "
                      "and corruption cases may not be supportable.",
                      "Verify each workload; migrate genuine databases/ES data "
-                     "volumes to block storage (Ceph RBD).",
+                     "volumes to block storage.",
                      assumption="Classified by PVC/namespace NAME matching "
                                 "database keywords - verify the actual "
                                 "workload before migrating.")
+        if on_local:
+            no_backup = self.facts.get("backup_stack") == "none detected"
+            self.add("CRITICAL" if no_backup else "HIGH", "Storage",
+                     "Database-looking PVCs on node-local, non-replicated "
+                     "storage%s" % (" WITH NO BACKUP TOOLING" if no_backup
+                                    else ""),
+                     "04-pvc.txt + 04-storageclasses.txt: "
+                     + "; ".join(on_local[:8]) +
+                     ("... (%d total)" % len(on_local) if len(on_local) > 8
+                      else ""),
+                     "Node-local volumes (LVMS/topolvm/local) have no "
+                     "replication: losing that node's disk destroys the data"
+                     + (" - and no backup product is installed to recover "
+                        "it. A single disk failure is permanent data loss."
+                        if no_backup else "."),
+                     "Back these volumes up (with a data mover - snapshots "
+                     "stay on the same disk), or move the data to "
+                     "replicated/external storage.",
+                     assumption="Classified by PVC/namespace NAME matching "
+                                "database keywords and by provisioner type.")
+        # functional validation: a cluster with StorageClasses but ZERO
+        # PVs+PVCs is either intentionally stateless or a BROKEN provisioner
+        if sc_rows and not pvs and pvc_total == 0:
+            ev_text = self.b.read("11-events-warning.txt") or ""
+            keywords = set()
+            for name, (prov, _r) in sc_info.items():
+                keywords.update(x for x in re.split(r"[-.]", name) if len(x) > 2)
+                keywords.add(prov.split(".")[0])
+            hits = sorted({w for w in keywords
+                           if w and re.search(re.escape(w), ev_text, re.I)})
+            # generic provisioner-failure signatures count as corroboration
+            m = re.search(r"NoAvailableDevices\w*|Provisioning ?Failed|"
+                          r"failed to provision|no volume plugin|"
+                          r"volume group|VolumeBinding\w*", ev_text, re.I)
+            if m:
+                hits.append(m.group(0))
+            ds_bad = [l.split()[1] for l in
+                      self.b.lines("06-daemonsets-status.txt")
+                      if len(l.split()) >= 5 and l.split()[4].isdigit()
+                      and int(l.split()[4]) > 0
+                      and re.search(r"storage|lvms|ceph|csi|trident",
+                                    l.split()[0] + l.split()[1])]
+            broken = hits or ds_bad
+            age_days = (self._collection_time() - self.profile.install_date).days \
+                if (self.profile.install_date and self._collection_time()) \
+                else None
+            young = age_days is not None and age_days < 30
+            # broken default-or-only class = no working storage at all
+            sev = ("CRITICAL" if broken and (defaults or len(sc_info) == 1)
+                   else "HIGH" if broken else
+                   "LOW" if young else "MEDIUM")
+            self.add(sev, "Storage",
+                     "StorageClass(es) exist but ZERO PVs/PVCs cluster-wide"
+                     + (" - provisioner appears NON-FUNCTIONAL" if broken
+                        else " - stateless by design or broken provisioner?"),
+                     "04-storageclasses.txt: %s; 04-pv.txt/04-pvc.txt empty."
+                     % ", ".join(sorted(sc_info)[:4])
+                     + (" 11-events-warning.txt mentions: %s."
+                        % ", ".join(hits[:4]) if hits else "")
+                     + (" Unhealthy provisioner DaemonSet(s): %s."
+                        % ", ".join(ds_bad[:3]) if ds_bad else ""),
+                     "Any workload requesting a PVC will hang Pending; "
+                     "platform components may silently fall back to "
+                     "ephemeral storage."
+                     + (" Cluster is %d day(s) old - possibly just unused "
+                        "so far." % age_days if young and not broken else ""),
+                     "Provision test: create a PVC against the default class "
+                     "and watch the provisioner logs; fix the backing "
+                     "storage (e.g. volume group, device paths) or remove "
+                     "the class if storage is genuinely not wanted.")
 
     # operator pairs where the first is superseded by the second - both
     # installed usually means an unfinished migration
@@ -855,12 +1230,19 @@ class Analyzer(object):
                                 "are deduplicated; only the newest pending "
                                 "version per operator is counted.")
         cats = self.b.read("05-catalogsource.txt") or ""
+        csvs_for_cat = self.b.read("05-csv.txt") or ""
         # which catalogs do installed operators actually USE?
         sub_sources = {}
+        subs_usable = bool(self.b.lines("05-subscriptions.txt"))
         for l in self.b.lines("05-subscriptions.txt"):
             tok = l.split()
             if len(tok) >= 4:
                 sub_sources.setdefault(tok[3], []).append(tok[1])
+        # Marketplace builds are recognizable by the -rhmp CSV suffix even
+        # when the subscriptions listing is empty
+        rhmp = sorted(set(re.findall(r"(\S+-rhmp)\.v?[\d.]", csvs_for_cat)))
+        if rhmp:
+            sub_sources.setdefault("redhat-marketplace", []).extend(rhmp)
         for cat, label in (("redhat-marketplace",
                             "Deprecated Red Hat Marketplace catalog"),
                            ("community-operators",
@@ -868,6 +1250,17 @@ class Analyzer(object):
             if cat not in cats:
                 continue
             users = sub_sources.get(cat, [])
+            if not users and not subs_usable:
+                self.add("LOW", "Lifecycle",
+                         "%s present - usage UNKNOWN" % label,
+                         "05-catalogsource.txt: %s exists; "
+                         "05-subscriptions.txt is empty (known collector "
+                         "limitation), so usage cannot be verified." % cat,
+                         "Operators may depend on this catalog without any "
+                         "visible Subscription rows.",
+                         "Check each installed operator's catalog provenance "
+                         "live before disabling the source.")
+                continue
             if users:
                 self.add("MEDIUM" if cat == "redhat-marketplace" else "LOW",
                          "Lifecycle",
@@ -940,16 +1333,24 @@ class Analyzer(object):
         # OperatorGroups without any CSV = uninstall remnants
         og_ns = {l.split()[0] for l in self.b.lines("05-operatorgroup.txt")
                  if l.split()}
-        csv_ns = {l.split()[0] for l in self.b.lines("05-csv.txt") if l.split()}
-        remnants = sorted(ns for ns in og_ns - csv_ns
+        ns_by_csv = {}
+        for l in self.b.lines("05-csv.txt"):
+            tok = l.split()
+            if len(tok) > 1:
+                ns_by_csv.setdefault(tok[1], set()).add(tok[0])
+        owning_ns = {ns for name, nss in ns_by_csv.items()
+                     if len(nss) <= 2 for ns in nss}
+        remnants = sorted(ns for ns in og_ns - owning_ns
                           if not PLATFORM_NS_RE.match(ns))
         if remnants:
             self.add("LOW", "Hygiene",
                      "%d namespace(s) with an OperatorGroup but no operator"
                      % len(remnants),
                      "05-operatorgroup.txt vs 05-csv.txt: " +
-                     ", ".join(remnants[:8]) +
-                     ("..." if len(remnants) > 8 else ""),
+                     ", ".join(remnants[:10]) +
+                     ("..." if len(remnants) > 10 else "") +
+                     " (namespaces holding only copied CSVs of operators "
+                     "installed elsewhere count as remnants).",
                      "Leftovers from uninstalled operators; a stray "
                      "OperatorGroup also breaks future installs into that "
                      "namespace.",
@@ -979,11 +1380,14 @@ class Analyzer(object):
                      "Not a live exposure today, but the first onboarded "
                      "workload will land without quota or network isolation.",
                      "Prepare a templated quota+LimitRange+default-deny "
-                     "baseline (e.g. via GitOps) before onboarding tenants.")
+                     "baseline (e.g. via GitOps) before onboarding tenants.",
+                     question="This cluster has no tenant workloads yet - "
+                              "what is its intended role?")
             return
         rq_cov = len(rq_ns & set(tenants))
         np_cov = len(np_ns & set(tenants))
         lr_cov = len(lr_ns & set(tenants))
+        gov_sev = "MEDIUM" if len(tenants) > 5 else "LOW"
         if len(tenants) > 5 and lr_cov == 0 and rq_cov:
             self.add("LOW", "Tenancy",
                      "ResourceQuotas exist but no LimitRange in any tenant "
@@ -993,8 +1397,8 @@ class Analyzer(object):
                      "requests/limits bypass sensible defaults and skew "
                      "quota accounting.",
                      "Pair every tenant quota with a LimitRange default.")
-        if len(tenants) > 5 and rq_cov < len(tenants) * 0.5:
-            self.add("MEDIUM", "Tenancy",
+        if rq_cov < len(tenants) * 0.5:
+            self.add(gov_sev, "Tenancy",
                      "ResourceQuotas cover only %d of %d tenant namespaces"
                      % (rq_cov, len(tenants)),
                      "06-resourcequota.txt vs 06-projects.txt (platform "
@@ -1003,10 +1407,11 @@ class Analyzer(object):
                      "and trigger cascading evictions.",
                      "Define a quota+LimitRange baseline for every tenant "
                      "namespace (templated, e.g. via GitOps).")
-        if len(tenants) > 5 and np_cov < len(tenants) * 0.5:
-            self.add("MEDIUM", "Security",
-                     "NetworkPolicies cover only %d of %d tenant namespaces"
-                     % (np_cov, len(tenants)),
+        uncovered = len(tenants) - np_cov
+        if np_cov < len(tenants) * 0.5 or uncovered >= 20:
+            self.add(gov_sev, "Security",
+                     "%d tenant namespace(s) have no NetworkPolicy "
+                     "(%d of %d covered)" % (uncovered, np_cov, len(tenants)),
                      "03-networkpolicy.txt vs 06-projects.txt (platform "
                      "namespaces excluded from the ratio).",
                      "Flat east-west network: any compromised pod reaches "
@@ -1037,7 +1442,11 @@ class Analyzer(object):
                         "place, drains are not the upgrade mechanism.)"
                         if self.profile.sno else ""),
                      "Add replicas or relax the PDBs so at least one "
-                     "disruption is allowed.")
+                     "disruption is allowed.",
+                     assumption="ALLOWED=0 can be a transient artifact while "
+                                "an outage keeps the guarded pods down - "
+                                "recheck once any ongoing incident is over.",
+                     cascade=True)
         wh = self.b.read("07-webhooks.txt") or ""
         n_fail = sum(1 for l in wh.splitlines()[1:] if "Fail" in l)
         if n_fail:
@@ -1052,6 +1461,7 @@ class Analyzer(object):
 
     def check_security(self):
         # restricted SCC drift
+        scc_drift = False
         for line in self.b.lines("07-scc.txt"):
             norm = line.replace("<no value>", "<no-value>")
             tok = norm.split()
@@ -1068,6 +1478,9 @@ class Analyzer(object):
                              "onto purpose-built custom SCCs.",
                              assumption="Compared against OCP 4.11+ default "
                                         "(seLinuxContext MustRunAs).")
+                    scc_drift = True
+        if self.b.lines("07-scc.txt") and not scc_drift:
+            self.green("Security", "Default restricted SCC matches stock values (07-scc.txt).")
         # custom SCC risk scoring - PRIV=true is NOT the only root-equivalent
         # signal (dangerous capabilities, RunAsAny, hostPath, volumes: * are
         # just as bad and slip past a PRIV-column-only filter)
@@ -1126,10 +1539,15 @@ class Analyzer(object):
                      "an elevated-privilege surface.",
                      "Confirm the SCCs are unmodified and bound only to the "
                      "operators' service accounts.")
-        # cluster-admin bindings
+        # cluster-admin bindings - resolve WHO each one grants to
         crb = self.b.read("07-clusterrolebindings.txt") or ""
+        crb_lines = crb.splitlines()
+        crb_header = crb_lines[0] if crb_lines else ""
+        groups_ok = self.b.status("07-groups.txt") in (S_OK, S_EMPTY)
+        groups_members = {l.split()[0]: (l.split() + [""])[1]
+                          for l in self.b.lines("07-groups.txt") if l.split()}
         admins, mg = [], []
-        for line in crb.splitlines()[1:]:
+        for line in crb_lines[1:]:
             if re.search(r"ClusterRole/cluster-admin(\s|$)", line):
                 name = line.split()[0]
                 if name.startswith("system:"):
@@ -1137,7 +1555,22 @@ class Analyzer(object):
                 if name.startswith("must-gather-"):
                     mg.append(name)
                 elif name not in DEFAULT_CLUSTER_ADMIN_CRBS:
-                    admins.append(name)
+                    subjects = []
+                    if "USERS" in crb_header:
+                        for col, kind in (("USERS", "user"),
+                                          ("GROUPS", "group"),
+                                          ("SERVICEACCOUNTS", "SA")):
+                            val = col_slice(crb_header, line, col,
+                                            ("GROUPS", "SERVICEACCOUNTS"))
+                            if val:
+                                subjects.append("%s:%s" % (kind, val))
+                                if kind == "group" and groups_ok \
+                                        and val in groups_members \
+                                        and not groups_members[val]:
+                                    subjects.append("(group %s has no "
+                                                    "members!)" % val)
+                    admins.append(name + (" -> %s" % " ".join(subjects)
+                                          if subjects else ""))
         if admins:
             self.add("HIGH" if len(admins) > 5 else "MEDIUM", "Security",
                      "%d non-default cluster-admin ClusterRoleBindings" % len(admins),
@@ -1160,11 +1593,19 @@ class Analyzer(object):
                      "Leftover full-admin grants from old support sessions.",
                      "Delete them.")
         if "kubeadmin" in (self.b.read("07-kubeadmin-exists.txt") or ""):
+            # do NOT advise removal while it is the only login path that
+            # survives an IdP/ingress outage (identity-path analysis)
+            fragile_idp = self.facts.get("idp_fragile", False)
             self.add("MEDIUM", "Security",
                      "kubeadmin bootstrap user still exists",
                      "07-kubeadmin-exists.txt: secret/kubeadmin present.",
                      "A static, unauditable break-glass password account "
                      "remains active.",
+                     "KEEP it for now as documented break-glass - the "
+                     "identity path is fragile (no IdP, unproven, or "
+                     "ingress-dependent; see the identity findings) and "
+                     "removing kubeadmin could lock admins out. Re-evaluate "
+                     "once a robust IdP path exists." if fragile_idp else
                      "Remove it once IdP-based admin access is confirmed "
                      "working.")
         # etcd encryption - "(empty result)" is the collector's empty marker,
@@ -1173,6 +1614,8 @@ class Analyzer(object):
         enc_missing = self.b.status("07-etcd-encryption.txt") in (
             S_EMPTY, S_MISSING) or not enc
         self.facts["etcd_encryption"] = "NOT ENABLED" if enc_missing else enc
+        if not enc_missing:
+            self.green("Security", "etcd encryption at rest enabled: %s (07-etcd-encryption.txt)." % enc)
         if enc_missing and self.b.status("07-etcd-encryption.txt") != S_MISSING:
             self.add("HIGH", "Security",
                      "etcd encryption at rest is not enabled",
@@ -1266,6 +1709,9 @@ class Analyzer(object):
                     if line.strip() and not term:
                         insecure += 1
                 self.facts["routes"] = len(lines_) - 1
+                if not insecure and self.facts["routes"]:
+                    self.green("Security", "All %d routes use TLS termination "
+                               "(03-routes.txt)." % self.facts["routes"])
                 if insecure:
                     self.add("LOW", "Security",
                              "%d route(s) without TLS termination" % insecure,
@@ -1306,14 +1752,28 @@ class Analyzer(object):
                          "Create cluster-monitoring-config with "
                          "volumeClaimTemplates (and a retention policy) on a "
                          "suitable StorageClass.")
-        self.add("HIGH" if not fwd else "MEDIUM", "Observability",
-                 "Verify alert notifications reach a human",
-                 fwd_evidence,
+        # empirical cross-check: a failure nobody fixed for days is PROOF
+        # the alert path is broken or ignored, not just "verify it"
+        unnoticed = self.facts.get("unnoticed_failure_days", 0)
+        UNNOTICED_MIN = 3
+        self.add("HIGH" if (not fwd or unnoticed >= UNNOTICED_MIN) else "MEDIUM",
+                 "Observability",
+                 "Verify alert notifications reach a human"
+                 + (" - evidence suggests they do NOT"
+                    if unnoticed >= UNNOTICED_MIN
+                    else ""),
+                 fwd_evidence
+                 + (" Empirical signal: backup jobs have been failing for "
+                    "at least ~%.0f days without correction - either no "
+                    "alert fires for them or nobody acts on it."
+                    % unnoticed if unnoticed >= UNNOTICED_MIN else ""),
                  "Alertmanager receiver config lives in a Secret this bundle "
                  "does not (and should not) collect - silent-alerting is the "
                  "most common root cause of long outages.",
                  "Send a synthetic test alert and confirm the on-call channel "
-                 "receives it end-to-end.",
+                 "receives it end-to-end"
+                 + ("; add an explicit alert on failed backup jobs."
+                    if unnoticed >= UNNOTICED_MIN else "."),
                  assumption="Receiver configuration is in a Secret and "
                             "therefore invisible to this analyzer; this "
                             "finding is a mandatory manual verification, not "
@@ -1420,7 +1880,10 @@ class Analyzer(object):
                         else "."),
                      "Confirm with the owner that Removed is deliberate "
                      "(it is a supported minimal-footprint choice); document "
-                     "the external registry dependency.")
+                     "the external registry dependency.",
+                     question="Is the internal image registry's Removed state "
+                              "deliberate? Where are images built and served "
+                              "from?")
         # apiserver posture - supported-but-consequential defaults
         apisrv = self.b.read("01-apiserver.yaml") or ""
         audit = yaml_grab(apisrv, "profile")
@@ -1451,6 +1914,8 @@ class Analyzer(object):
                  "NetworkUnavailable"), tok[2:6]) if val == "True"]
             if pressures:
                 flagged.append("%s (%s)" % (tok[0], ", ".join(pressures)))
+        if not flagged and self.b.lines("02-nodes-conditions.txt"):
+            self.green("Stability", "No node reports Memory/Disk/PID pressure or NetworkUnavailable (02-nodes-conditions.txt).")
         if flagged:
             self.add("HIGH", "Stability",
                      "%d node(s) reporting resource pressure" % len(flagged),
@@ -1482,6 +1947,8 @@ class Analyzer(object):
             if unavail.isdigit() and int(unavail) > 0:
                 under.append("DaemonSet %s/%s unavailable=%s"
                              % (ns, name, unavail))
+        if not under and self.b.lines("06-workloads-status.txt"):
+            self.green("Workloads", "All Deployments/StatefulSets at desired replicas; no DaemonSet unavailability (06-workloads-status.txt).")
         if under:
             self.add("MEDIUM", "Workloads",
                      "%d workload(s) below desired replicas" % len(under),
@@ -1491,7 +1958,8 @@ class Analyzer(object):
                      "with unavailable pods reduce redundancy or indicate crash "
                      "loops.",
                      "Correlate with 06-pods-all.txt and 11-events-warning.txt "
-                     "for the root cause.")
+                     "for the root cause.",
+                     cascade=True)
 
     def check_nncp(self):
         bad = []
@@ -1531,6 +1999,8 @@ class Analyzer(object):
     def check_etcd_health(self):
         readyz = self.b.read("01-etcd-readyz.txt") or ""
         failing = [l.strip() for l in readyz.splitlines() if l.startswith("[-]")]
+        if not failing and self.b.status("01-etcd-readyz.txt") == S_OK:
+            self.green("Stability", "All API-server readiness gates ok (01-etcd-readyz.txt).")
         if failing:
             self.add("HIGH", "Stability",
                      "%d API-server readiness gate(s) failing" % len(failing),
@@ -1561,7 +2031,8 @@ class Analyzer(object):
                      "pod network; workloads scheduled there fail to get "
                      "connectivity.",
                      "Check the ovnkube-node DaemonSet and the node's "
-                     "kubelet/CNI.")
+                     "kubelet/CNI.",
+                     cascade=True)
 
     def check_acm_policies(self):
         noncompliant = []
@@ -1646,6 +2117,17 @@ class Analyzer(object):
                        (parse_iso_time(x) for x in re.findall(
                            r"completionTime:\s*(\S+)", yaml_block(cv, "history")))
                        if t)
+        if times:
+            gaps = [(b - a).days for a, b in zip(times, times[1:])]
+            if any(g > 365 for g in gaps):
+                self.add("MEDIUM", "Lifecycle",
+                         "Update history shows gap(s) longer than a year",
+                         "01-clusterversion.yaml history: largest gap %d "
+                         "days across %d recorded updates."
+                         % (max(gaps), len(times)),
+                         "Long gaps force multi-minor catch-up jumps later - "
+                         "the riskiest upgrade pattern.",
+                         "Adopt a fixed patching cadence.")
         if now and times:
             stale_days = (now - times[-1]).days
             if stale_days >= 90:
@@ -1661,23 +2143,14 @@ class Analyzer(object):
                          "quarterly); review the pending-updates list.",
                          assumption="Staleness measured from the bundle "
                                     "collection time, thresholds 90/180 days.")
-            gaps = [(b - a).days for a, b in zip(times, times[1:])]
-            if any(g > 365 for g in gaps):
-                self.add("MEDIUM", "Lifecycle",
-                         "Update history shows gap(s) longer than a year",
-                         "01-clusterversion.yaml history: largest gap %d "
-                         "days across %d recorded updates."
-                         % (max(gaps), len(times)),
-                         "Long gaps force multi-minor catch-up jumps later - "
-                         "the riskiest upgrade pattern.",
-                         "Adopt a fixed patching cadence.")
         # pending updates backlog (01-upgrade.txt table) + security errata
         upg = self.b.read("01-upgrade.txt") or ""
         m = re.search(r"Recommended updates:\s*\n(.*)", upg, re.S)
         n_updates = len(re.findall(r"^\s+(\d+\.\d+\.\d+)\s", m.group(1), re.M)) \
             if m else 0
-        rhsa = len(set(re.findall(r"(RHSA-\d{4}:\d+)", cv)))
-        if n_updates >= 5:
+        rhsa = len(set(re.findall(r"(RHSA-\d{4}:\d+)",
+                                  yaml_block(cv, "availableUpdates"))))
+        if n_updates >= 5 or (rhsa and n_updates >= 1):
             self.add("MEDIUM", "Lifecycle",
                      "%d recommended z-stream update(s) pending%s"
                      % (n_updates,
@@ -1740,7 +2213,8 @@ class Analyzer(object):
                      "Pods cannot be placed - capacity, taints, affinity or "
                      "PVC binding is blocking scheduling.",
                      "Read one event's full message for the exact predicate "
-                     "that failed.")
+                     "that failed.",
+                     cascade=True)
         if len(mount) >= 3:
             self.add("MEDIUM", "Storage",
                      "Recurring volume mount/attach failures (%d)" % len(mount),
@@ -1803,6 +2277,8 @@ class Analyzer(object):
     def check_csr(self):
         pend = [l.split()[0] for l in self.b.lines("02-csr.txt")
                 if "Pending" in l]
+        if not pend and self.b.status("02-csr.txt") in (S_OK, S_EMPTY):
+            self.green("Stability", "No pending certificate signing requests (02-csr.txt).")
         if pend:
             self.add("HIGH", "Stability",
                      "%d certificate signing request(s) Pending" % len(pend),
@@ -1879,7 +2355,8 @@ class Analyzer(object):
                          "Degraded Prometheus/Alertmanager means gaps in "
                          "metrics and undelivered alerts RIGHT NOW.",
                          "Check the pods and PVCs in openshift-monitoring; "
-                         "see also 06-pods-all.txt.")
+                         "see also 06-pods-all.txt.",
+                         cascade=True)
 
     def check_egress_targets(self):
         urls = []
@@ -1895,7 +2372,9 @@ class Analyzer(object):
                      "Telemetry/metrics egress to external endpoints - a "
                      "data-flow the owner should be able to name.",
                      "Confirm each destination is intended (and reachable "
-                     "on air-gapped networks).")
+                     "on air-gapped networks).",
+                     question="Are the remoteWrite/telemetry egress "
+                              "destinations listed in the report intended?")
 
     def check_routes_hosts(self):
         t = self.b.read("03-routes.txt")
@@ -1922,11 +2401,14 @@ class Analyzer(object):
                      "A route claiming a foreign hostname only works with "
                      "external DNS pointing here - or it is a leftover / "
                      "spoofing risk (first-claim wins inside the router).",
-                     "Verify each is intentional; delete leftovers.")
+                     "Verify each is intentional; delete leftovers.",
+                     question="Are the routes claiming hostnames outside the "
+                              "cluster's domains intentional?")
 
     def check_naming_hygiene(self):
-        test_re = re.compile(r"(^|[-_])(test\d*|tmp|temp|debug|demo|scratch|"
-                             r"todelete|delete-?me)([-_\d]|$)", re.I)
+        test_re = re.compile(r"(^|[-_])(test\w{0,3}|tmp|temp|debug|demo|"
+                             r"scratch|todelete|delete-?me|my)([-_\d]|$)",
+                             re.I)
         suspects = sorted(n for n in self.profile.tenant_namespaces
                           if test_re.search(n))
         if suspects:
@@ -1979,7 +2461,261 @@ class Analyzer(object):
                          "paper over a broken mechanism (e.g. auto-unseal "
                          "loops imply unseal keys stored nearby).",
                          "Review each: is the cadence justified, and where "
-                         "do its credentials live?")
+                         "do its credentials live?",
+                         question="For the unusual CronJobs flagged: where do "
+                                  "their credentials live and is the design "
+                                  "intended?")
+
+    def check_failed_jobs(self):
+        """Failed platform Jobs; a wedged Job often explains a degraded CO."""
+        failed = []
+        for line in self.b.lines("06-jobs.txt"):
+            tok = line.split()
+            if len(tok) >= 4 and tok[0].startswith("openshift-") and (
+                    tok[2] == "Failed" or tok[3].startswith("0/")):
+                failed.append("%s/%s (%s)" % (tok[0], tok[1], tok[2]))
+        if not failed:
+            return
+        pruner = [f for f in failed if "image-pruner" in f]
+        registry_removed = yaml_grab(
+            self.b.read("07-imageregistry.yaml") or "", "managementState") \
+            == "Removed"
+        self.add("MEDIUM", "Stability",
+                 "%d failed platform Job(s)" % len(failed),
+                 "06-jobs.txt: " + "; ".join(failed[:6]) +
+                 ("..." if len(failed) > 6 else ""),
+                 "Failed jobs in openshift-* namespaces often drive operator "
+                 "Degraded conditions (check the operators' condition "
+                 "messages for the job name)."
+                 + (" The image-pruner job is failing although the internal "
+                    "registry is Removed - it prunes nothing and only "
+                    "degrades the image-registry operator."
+                    if pruner and registry_removed else ""),
+                 ("Suspend the pruner (imagepruner CR) or delete the failed "
+                  "job, then confirm the operator recovers. "
+                  if pruner and registry_removed else "")
+                 + "Read each failed job's logs and fix or remove it.")
+
+    # installed operator -> the collected file that would hold its instances
+    IDLE_OPERATOR_MAP = [
+        (r"loki-operator", "08-lokistack.txt", "LokiStack"),
+        (r"kubernetes-nmstate|nmstate-operator", "03-nncp.yaml",
+         "node network policies"),
+        (r"metallb", "03-metallb.txt", "MetalLB address pools"),
+        (r"odf-operator\.|ocs-operator\.", "04-storagecluster.txt",
+         "StorageCluster"),
+        (r"oadp-operator|redhat-oadp", "10-oadp-dpa.txt",
+         "DataProtectionApplication"),
+        (r"sriov-network-operator", "03-sriov.txt", "SR-IOV networks"),
+        (r"gpu-operator", "12-clusterpolicy.yaml", "GPU ClusterPolicy"),
+        (r"rhacs-operator|advanced-cluster-security", "07-acs-central.txt",
+         "ACS Central"),
+        (r"compliance-operator", "07-compliance.txt", "compliance scans"),
+        (r"cluster-logging\.", "08-clusterlogging.txt", "ClusterLogging"),
+        (r"openshift-gitops-operator", "09-argocd.txt", "Argo CD instance"),
+        (r"openshift-pipelines-operator", "09-tektonconfig.txt",
+         "TektonConfig"),
+    ]
+
+    def check_idle_operators(self):
+        # match against CSV NAMES only - `oc get csv -A` repeats copied CSVs
+        # in every namespace, and namespace names must not count as installs
+        csv_names = " ".join(l.split()[1] for l in self.b.lines("05-csv.txt")
+                             if len(l.split()) > 1)
+        idle = []
+        for pat, cr_file, label in self.IDLE_OPERATOR_MAP:
+            m = re.search(pat, csv_names)
+            if m and self.b.status(cr_file) in (S_EMPTY, S_ERR_ABSENT,
+                                                S_ERR_NOTFOUND):
+                idle.append("%s (no %s - %s)" % (m.group(0), label, cr_file))
+        if idle:
+            self.add("LOW", "Hygiene",
+                     "%d operator(s) installed but with no configured "
+                     "instances" % len(idle),
+                     "05-csv.txt cross-referenced with instance files: "
+                     + "; ".join(idle[:6]) + ("..." if len(idle) > 6 else ""),
+                     "Idle operators consume memory, enlarge the upgrade "
+                     "test matrix, and mislead reviewers about what the "
+                     "cluster actually does.",
+                     "Configure each operator or uninstall it (and its "
+                     "OperatorGroup/namespace).",
+                     assumption="Judged by the absence of the operator's "
+                                "primary CR in the bundle; instances of "
+                                "kinds the collector does not gather are "
+                                "invisible.")
+
+    def check_identity_path(self):
+        """Where does login actually depend on - and does it loop?"""
+        oauth = self.b.read("07-oauth.yaml") or ""
+        spec = yaml_block(oauth, "spec") or oauth
+        apps = yaml_grab(self.b.read("01-ingress-config.yaml") or "", "domain")
+        base = yaml_grab(self.b.read("01-dns.yaml") or "", "baseDomain")
+        hosts = set()
+        for u in re.findall(r"(?:url|issuer):\s*(\S+)", spec):
+            m = re.match(r"[a-z]+s?://([^/:?]+)", u)
+            if m:
+                hosts.add(m.group(1))
+        fragile = False
+        for h in sorted(hosts):
+            if apps and h.endswith(apps):
+                fragile = True
+                self.add("HIGH", "Security",
+                         "Identity provider is hosted on THIS cluster's own "
+                         "ingress (circular dependency)",
+                         "07-oauth.yaml: IdP endpoint %s is under the "
+                         "cluster's apps domain %s." % (h, apps),
+                         "Any ingress/worker outage also removes all "
+                         "interactive login - exactly when admins need to "
+                         "get in. Break-glass access must not depend on the "
+                         "cluster being healthy.",
+                         "Document the kubeconfig/kubeadmin break-glass "
+                         "path; consider hosting SSO outside the cluster it "
+                         "authenticates.")
+            elif ".apps." in h and not (base and h.endswith(base)):
+                fragile = True
+                self.add("MEDIUM", "Security",
+                         "Identity provider appears to be hosted on ANOTHER "
+                         "OpenShift cluster",
+                         "07-oauth.yaml: IdP endpoint %s looks like a "
+                         "different cluster's apps domain." % h,
+                         "Login here depends on that other cluster's "
+                         "health - a cross-cluster single point of failure "
+                         "for the whole estate.",
+                         "Confirm the dependency direction is intended; "
+                         "verify both clusters' reviews cover it.",
+                         assumption="Cluster-of-origin inferred from the "
+                                    "'.apps.' hostname convention.")
+        idps = re.findall(r"^\s*type:\s*(\w+)\s*$", spec, re.M)
+        users = len(self.b.lines("07-users.txt"))
+        if idps and users == 0 and self.b.status("07-users.txt") in (
+                S_OK, S_EMPTY):
+            fragile = True
+            self.add("MEDIUM", "Security",
+                     "IdP configured but no user has ever logged in through it",
+                     "07-oauth.yaml: identityProviders %s; 07-users.txt: 0 "
+                     "users." % ", ".join(idps),
+                     "The login path is unproven - it may be broken "
+                     "(endpoint, CA, client secret) without anyone noticing.",
+                     "Perform a test login; fix or remove the IdP.",
+                     question="Has anyone ever logged in through the "
+                              "configured IdP? What is the break-glass path "
+                              "if it fails?")
+        if re.search(r"mappingMethod:\s*add", spec):
+            self.add("LOW", "Security",
+                     "IdP mappingMethod 'add' in use",
+                     "07-oauth.yaml: mappingMethod: add.",
+                     "'add' merges identities from different providers into "
+                     "one user when names collide - an account-takeover "
+                     "vector if provider namespaces overlap.",
+                     "Prefer 'claim' unless deliberate cross-provider "
+                     "merging is required.")
+        # identities whose IdP no longer exists in the spec
+        # (the name: key may open a list item: "- name: x")
+        idp_names = set(re.findall(r"^\s*-?\s*name:\s*(\S+)\s*$", spec, re.M))
+        orphans = {l.split()[1] for l in self.b.lines("07-identities.txt")
+                   if len(l.split()) >= 2 and idp_names
+                   and l.split()[1] not in idp_names}
+        if orphans:
+            self.add("LOW", "Hygiene",
+                     "Identities from removed identity provider(s): %s"
+                     % ", ".join(sorted(orphans)[:4]),
+                     "07-identities.txt references IdP name(s) absent from "
+                     "07-oauth.yaml spec.",
+                     "Stale identities keep old user mappings (and their "
+                     "RBAC) alive after a provider is retired.",
+                     "Delete the orphaned Identity/User objects after "
+                     "confirming they are unused.")
+        self.facts["idp_fragile"] = fragile or not idps
+
+    def check_recent_transitions(self):
+        """Incident forensics on a green snapshot: a healthy state that
+        became healthy HOURS ago is a recent incident, not a clean bill."""
+        now = self._collection_time()
+        if now is None:
+            return
+        window_h = 48
+        recent = []
+        conds = parse_named_conditions(
+            self.b.read("01-clusteroperators.yaml") or "")
+        bad_cos = self.facts.get("bad_cos", set())
+        for co, cl in sorted(conds.items()):
+            if co in bad_cos:
+                continue     # still unhealthy: covered by its own finding
+            for c in cl:
+                if c.get("type") not in ("Available", "Degraded",
+                                         "Progressing"):
+                    continue
+                healthy = (c["type"] == "Available"
+                           and c.get("status") == "True") or \
+                    (c["type"] in ("Degraded", "Progressing")
+                     and c.get("status") == "False")
+                t = parse_iso_time(c.get("lastTransitionTime"))
+                if healthy and t and 0 <= (now - t).total_seconds() \
+                        <= window_h * 3600:
+                    recent.append("%s %s->%s %sh ago"
+                                  % (co, c["type"],
+                                     c.get("status"),
+                                     int((now - t).total_seconds() // 3600)))
+        cv = self.b.read("01-clusterversion.yaml") or ""
+        for c in parse_conditions(cv, all_blocks=True):
+            t = parse_iso_time(c.get("lastTransitionTime"))
+            if c.get("type") == "Failing" and c.get("status") == "False" \
+                    and t and 0 <= (now - t).total_seconds() <= window_h * 3600:
+                recent.append("ClusterVersion Failing cleared %sh ago"
+                              % int((now - t).total_seconds() // 3600))
+        if len(recent) >= 2:
+            self.add("MEDIUM", "Stability",
+                     "%d operator condition(s) transitioned within the last "
+                     "%dh - a recent incident likely resolved" % (len(recent),
+                                                                  window_h),
+                     "01-clusteroperators.yaml lastTransitionTime: "
+                     + "; ".join(recent[:8]) +
+                     ("..." if len(recent) > 8 else ""),
+                     "The cluster is healthy NOW, but these conditions "
+                     "flipped very recently - a same-day incident leaves no "
+                     "other trace in a point-in-time snapshot.",
+                     "Ask what happened in this window; check metrics/logs "
+                     "before they age out (see the monitoring persistence "
+                     "finding if metrics are ephemeral).",
+                     question="Operator conditions transitioned within the "
+                              "last %dh - what happened, and is it fully "
+                              "resolved?" % window_h)
+        # mass-restart clustering: many pods restarted in one recent window
+        cluster_age = (now - self.profile.install_date).days \
+            if self.profile.install_date else None
+        recency, young = [], 0
+        rows = self.b.lines("06-pods-all.txt")
+        for line in rows:
+            tok = line.split()
+            if len(tok) > 6 and tok[5].startswith("("):
+                h = parse_age_days(tok[5].lstrip("(")) * 24
+                if h <= window_h:
+                    recency.append(h)
+            age_col = tok[7] if len(tok) > 7 and tok[5].startswith("(") else \
+                (tok[5] if len(tok) > 5 else "")
+            if parse_age_days(age_col) < 1:
+                young += 1
+        if len(recency) >= 10:
+            self.add("MEDIUM", "Stability",
+                     "%d pod(s) restarted within the last %dh (mass-restart "
+                     "signature)" % (len(recency), window_h),
+                     "06-pods-all.txt RESTARTS recency: restarts cluster "
+                     "between ~%dh and ~%dh ago."
+                     % (min(recency), max(recency)),
+                     "Synchronized restarts point at a node reboot, network "
+                     "blip or control-plane event in that window.",
+                     "Correlate with the condition transitions above and "
+                     "with 11-events-warning.txt.")
+        if cluster_age and cluster_age > 30 and rows \
+                and young / len(rows) > 0.3:
+            self.add("MEDIUM", "Stability",
+                     "%d%% of pods are younger than 24h on a %d-day-old "
+                     "cluster" % (100 * young // len(rows), cluster_age),
+                     "06-pods-all.txt AGE column vs install date.",
+                     "Mass pod recreation - node reboot, drain, or upgrade - "
+                     "happened within the last day.",
+                     "Confirm what maintenance/incident occurred; verify "
+                     "stateful workloads came back consistent.")
 
     def _collection_time(self):
         m = re.search(r"_(\d{8})-(\d{6})$", self.b.path.name)
@@ -1992,6 +2728,45 @@ class Analyzer(object):
 
     def check_cert_expiry(self):
         rows = self.b.lines("07-cert-expiry.txt")
+        # user-referenced certs MISSING from the expiry report are the ones
+        # most likely to be manually managed - and to expire unnoticed
+        referenced = set()
+        ic = self.b.read("03-ingresscontroller.yaml") or ""
+        m = re.search(r"defaultCertificate:\s*\n\s*name:\s*(\S+)", ic)
+        if m:
+            referenced.add((m.group(1), "IngressController "
+                            "defaultCertificate"))
+        apisrv = self.b.read("01-apiserver.yaml") or ""
+        for m in re.finditer(r"servingCertificate:\s*\n\s*name:\s*(\S+)",
+                             apisrv):
+            referenced.add((m.group(1), "APIServer namedCertificate"))
+        expiry_named = {l.split()[1]: (l.split() + ["", ""])[2]
+                        for l in rows if l.split()}
+        unobservable = ["%s (%s)" % (name, role)
+                        for name, role in sorted(referenced)
+                        if expiry_named.get(name, "<none>") in ("<none>", "")]
+        if unobservable:
+            cert_mgr = self.b.status("07-certificates.txt") == S_OK
+            expiry_src = ("no certificate-not-after annotation in "
+                          "07-cert-expiry.txt"
+                          if self.b.status("07-cert-expiry.txt") == S_OK else
+                          "07-cert-expiry.txt was not collected (older "
+                          "bundle)")
+            self.add("MEDIUM", "Security",
+                     "%d user-supplied certificate(s) with UNOBSERVABLE "
+                     "expiry" % len(unobservable),
+                     "Referenced by config but %s: " % expiry_src
+                     + "; ".join(unobservable)
+                     + (". cert-manager Certificates exist "
+                        "(07-certificates.txt) - renewal may be handled."
+                        if cert_mgr else
+                        ". No cert-manager CRs visible to renew them."),
+                     "Exactly the certs most likely to be manually managed "
+                     "(console/API/all routes break at once when the "
+                     "ingress default cert expires) - and this review "
+                     "cannot see their dates.",
+                     "Check their expiry live (`openssl x509 -enddate`) and "
+                     "put renewal under cert-manager or a calendar process.")
         now = self._collection_time()
         if not rows or now is None:
             return
@@ -2014,7 +2789,8 @@ class Analyzer(object):
             auto = bool(AUTOROTATED_ISSUER_RE.search(issuer)
                         or (not issuer and re.match(
                             r"openshift-(kube-|etcd|config-managed|"
-                            r"service-ca|machine-config)", tok[0])))
+                            r"service-ca|machine-config|oauth-apiserver|"
+                            r"apiserver$|authentication)", tok[0])))
             (rotated if auto else soon).append(
                 (days, "%s/%s (%dd)" % (tok[0], tok[1], days)))
         base_assumption = ("Days counted from the bundle collection time "
@@ -2024,12 +2800,18 @@ class Analyzer(object):
                            % now.strftime("%Y-%m-%d"))
         if rotated:
             rotated.sort()
-            self.add("LOW", "Security",
+            rot_owner_bad = sorted(self.facts.get("bad_cos", set()) &
+                                   {"kube-apiserver", "kube-controller-manager",
+                                    "etcd"})
+            self.add("HIGH" if rot_owner_bad else "LOW", "Security",
                      "%d auto-rotated platform certificate(s) in their "
                      "normal renewal window" % len(rotated),
                      "07-cert-expiry.txt: " +
                      ", ".join(s for _, s in rotated[:6]) +
-                     ("..." if len(rotated) > 6 else ""),
+                     ("..." if len(rotated) > 6 else "")
+                     + (" ROTATION AT RISK: the rotating operator(s) %s are "
+                        "currently unhealthy." % ", ".join(rot_owner_bad)
+                        if rot_owner_bad else ""),
                      "Platform-signer leaf certs are short-lived by design; "
                      "the risk is only a STALLED rotation (unhealthy owning "
                      "operator) or, on SNO, a node powered off across the "
@@ -2061,13 +2843,18 @@ class Analyzer(object):
                      "manually managed certificates before expiry.",
                      assumption=base_assumption)
 
+    # order matters: nodes (outage root) before its cascade consumers;
+    # backup before storage/monitoring (composite findings read its facts);
+    # identity_path before security (kubeadmin advice gating)
     ALL_CHECKS = [
         check_meta, check_access, check_version, check_clusterversion,
-        check_upgrade_posture, check_clusteroperators, check_nodes,
-        check_node_pressure, check_topology_spread, check_csr, check_mcp,
-        check_pods, check_workload_status, check_etcd_backup, check_etcd_health,
-        check_storage, check_olm, check_tenancy, check_naming_hygiene,
-        check_pdb_webhooks,
+        check_upgrade_posture, check_nodes, check_node_pressure,
+        check_clusteroperators, check_recent_transitions,
+        check_topology_spread, check_csr, check_mcp,
+        check_pods, check_workload_status, check_failed_jobs,
+        check_etcd_backup, check_etcd_health,
+        check_storage, check_olm, check_idle_operators, check_tenancy,
+        check_naming_hygiene, check_pdb_webhooks, check_identity_path,
         check_security, check_acm_policies, check_cert_expiry, check_network,
         check_routes_hosts, check_nncp, check_whereabouts,
         check_ovnkube_coverage, check_monitoring, check_prom_am,
@@ -2078,6 +2865,7 @@ class Analyzer(object):
 
     def run(self):
         for chk in self.ALL_CHECKS:
+            self._check = chk.__name__
             try:
                 chk(self)
             except Exception as exc:                        # noqa: BLE001
@@ -2087,6 +2875,15 @@ class Analyzer(object):
                          "A malformed/unexpected file layout; that area was "
                          "not analyzed.",
                          "Review the corresponding files manually.")
+        # cascade consolidation: point the outage root at its symptom count
+        n_casc = sum(1 for f in self.findings if f.get("cascade"))
+        if n_casc:
+            for f in self.findings:
+                if "node(s) not Ready" in f["title"]:
+                    f["evidence"] += (" %d further finding(s) below are "
+                                      "tagged as likely cascade effects of "
+                                      "this outage." % n_casc)
+                    break
         self.findings.sort(key=lambda f: SEV_ORDER.index(f["sev"]))
 
 
@@ -2123,7 +2920,9 @@ def render_overview(a, bundle_name):
     L.append("| Topology | control plane: %s, workers: %s |"
              % (a.profile.cp_topology, a.profile.infra_topology))
     L.append("| Connectivity | %s |"
-             % ("disconnected/mirrored" if a.profile.disconnected
+             % ("disconnected (cannot reach update graph)"
+                if a.profile.disconnected else
+                "connected, image mirrors configured" if a.profile.mirrored
                 else "connected (no mirror/proxy signals)"))
     L.append("| Release image mirror | %s |" % f.get("release_mirror", "-"))
     L.append("| Internal image registry | %s |" % f.get("registry_state", "?"))
@@ -2213,7 +3012,7 @@ def render_overview(a, bundle_name):
     return "\n".join(L) + "\n"
 
 
-def render_issues(a, bundle_name):
+def render_issues(a, bundle_name, prev_diff=None):
     counts = {}
     for f in a.findings:
         counts[f["sev"]] = counts.get(f["sev"], 0) + 1
@@ -2224,30 +3023,73 @@ def render_issues(a, bundle_name):
              % (bundle_name, TOOLKIT_VERSION, BUILD_KNOWLEDGE_DATE,
                 ", ".join("%s: %d" % (s, counts[s]) for s in SEV_ORDER if s in counts)))
     L.append("")
-    L.append("> Every finding cites the bundle file it came from. Findings "
-             "marked with an **Assumption** are heuristic - verify them "
-             "before presenting to the customer. This offline analyzer "
-             "CANNOT check: Red Hat lifecycle/CVE status, etcd latency "
-             "metrics, Ceph internal health, or anything inside Secrets. "
-             "See manual-review-guide.md.")
+    L.append("> Every finding cites the bundle file it came from (the "
+             "'Evidence file reference' appendix maps files to the `oc` "
+             "commands that produced them). Findings marked with an "
+             "**Assumption** are heuristic - verify them before presenting "
+             "to the customer. This offline analyzer CANNOT check: Red Hat "
+             "lifecycle/CVE status, etcd latency metrics, Ceph internal "
+             "health, or anything inside Secrets. See "
+             "manual-review-guide.md and attention-points.md.")
     L.append("")
     L.append("**Calibration:** %s." % a.profile.describe())
     L.append("")
+    # top priorities: the first CRITICAL/HIGH findings, cascade children
+    # excluded (their root already ranks)
+    top = [(i + 1, f) for i, f in enumerate(a.findings)
+           if f["sev"] in ("CRITICAL", "HIGH") and not f.get("cascade")][:5]
+    if top:
+        L.append("## Top priorities")
+        L.append("")
+        for rank, (n, f) in enumerate(top, 1):
+            L.append("%d. **#%d %s** (%s)" % (rank, n, f["title"], f["sev"]))
+        L.append("")
+    if prev_diff:
+        L.append("## Changes since previous run")
+        L.append("")
+        for label, items in (("New", prev_diff["new"]),
+                             ("Resolved", prev_diff["resolved"]),
+                             ("Severity changed", prev_diff["changed"])):
+            if items:
+                L.append("- **%s (%d):** %s" % (label, len(items),
+                                                "; ".join(items[:8])
+                                                + ("..." if len(items) > 8
+                                                   else "")))
+        if not any(prev_diff.values()):
+            L.append("- No changes vs the previous run.")
+        L.append("")
     cur = None
     idx = 0
+    files_cited = set()
     for f in a.findings:
         if f["sev"] != cur:
             cur = f["sev"]
             L.append("## %s" % cur)
             L.append("")
         idx += 1
+        files_cited.update(re.findall(r"\b(\d{2}-[\w.-]+?\.(?:txt|yaml|json))",
+                                      f["evidence"]))
         L.append("### %d. %s  `[%s]`" % (idx, f["title"], f["area"]))
         L.append("")
+        if f.get("cascade"):
+            L.append("- **Cascade:** likely a downstream symptom of the "
+                     "node outage (see the 'not Ready' finding) - re-assess "
+                     "after recovery.")
         L.append("- **Evidence:** %s" % f["evidence"])
         L.append("- **Risk:** %s" % f["risk"])
         L.append("- **Recommendation:** %s" % f["rec"])
         if f["assumption"]:
             L.append("- **Assumption:** %s" % f["assumption"])
+        L.append("")
+    if a.greens:
+        L.append("## Verified healthy")
+        L.append("")
+        L.append("Positive assertions, each backed by bundle data (absence "
+                 "of a finding above does NOT imply health - this list "
+                 "does):")
+        L.append("")
+        for area, statement in a.greens:
+            L.append("- `[%s]` %s" % (area, statement))
         L.append("")
     if a.suppressed:
         L.append("## Suppressed by topology calibration")
@@ -2263,6 +3105,101 @@ def render_issues(a, bundle_name):
     for s in a.assumptions:
         L.append("- %s" % s)
     L.append("")
+    for _area, statement in a.greens:
+        files_cited.update(re.findall(r"\b(\d{2}-[\w.-]+?\.(?:txt|yaml|json))",
+                                      statement))
+    cited = sorted(f for f in files_cited if f in FILE_COMMANDS)
+    if cited:
+        L.append("## Evidence file reference")
+        L.append("")
+        L.append("| File | Command |")
+        L.append("|---|---|")
+        for f in cited:
+            L.append("| %s | `%s` |" % (f, FILE_COMMANDS[f]))
+        L.append("")
+    return "\n".join(L) + "\n"
+
+
+def render_attention(a, bundle_name):
+    """Reviewer-facing, bundle-specific notes (not for the customer)."""
+    L = []
+    L.append("# Attention Points (reviewer-internal, auto-generated)")
+    L.append("")
+    L.append("*Bundle:* `%s` - analyzer %s. Internal notes: collection "
+             "anomalies, unverifiable items, and questions to ask the "
+             "customer. Not part of the customer-facing deliverable."
+             % (bundle_name, TOOLKIT_VERSION))
+    L.append("")
+    # data freshness
+    coll = a._collection_time()
+    if coll:
+        age = (datetime.now() - coll).days
+        L.append("## Data freshness")
+        L.append("")
+        L.append("- Collected %s (%d day(s) before this analysis).%s"
+                 % (coll.strftime("%Y-%m-%d %H:%M"), age,
+                    " **Older than 14 days - recommend a fresh collection "
+                    "before presenting.**" if age > 14 else ""))
+        L.append("")
+    # collection anomalies
+    L.append("## Collection anomalies")
+    L.append("")
+    da = a.facts.get("data_availability") or {}
+    anomalies = []
+    if a.facts.get("collector") and "admin" in a.facts["collector"]:
+        anomalies.append("Collected as `%s` - not a least-privilege audit "
+                         "account (see the write-permissions finding, if "
+                         "raised)." % a.facts["collector"])
+    for f in da.get("failed", []):
+        anomalies.append("`%s` FAILED to collect - that data is unknown."
+                         % f)
+    if a.facts.get("bundle_format", BUNDLE_FORMAT) > BUNDLE_FORMAT:
+        anomalies.append("Bundle format is newer than this analyzer.")
+    if not a.facts.get("collector_version") or \
+            "unknown" in str(a.facts.get("collector_version")):
+        anomalies.append("Pre-versioning collector (old bundle layout); "
+                         "some checks may have skipped silently - see "
+                         "MISSING notes in manual-review-guide.md.")
+    for line in anomalies or ["- none detected"]:
+        L.append("- %s" % line if not line.startswith("-") else line)
+    L.append("")
+    # secret-shaped content scan (defense in depth after 41ab1f5)
+    leaks = []
+    if a.b.path.is_dir():
+        for p in sorted(a.b.path.iterdir()):
+            if p.suffix not in (".yaml", ".txt", ".json") or \
+                    p.stat().st_size > 1024 * 1024:
+                continue
+            t = p.read_text(errors="replace")
+            if re.search(r"(clientSecret|bindPassword|password|token):\s*"
+                         r"[A-Za-z0-9+/=_-]{12,}\s*$", t, re.M):
+                leaks.append(p.name)
+    L.append("## Confidentiality")
+    L.append("")
+    if leaks:
+        L.append("- **Possible secret material in:** %s - inspect and "
+                 "redact before sharing; rotate if the bundle traveled."
+                 % ", ".join(leaks[:6]))
+    L.append("- The bundle contains real hostnames, usernames and the full "
+             "route inventory. Run `sanitize-ocp-bundle.py` before sharing "
+             "beyond the account team.")
+    L.append("")
+    # unverifiable / heuristic findings
+    hedged = [(f["title"], f["assumption"]) for f in a.findings
+              if f.get("assumption")]
+    if hedged:
+        L.append("## Verify before presenting (heuristic findings)")
+        L.append("")
+        for title, assumption in hedged:
+            L.append("- **%s** - %s" % (title, assumption))
+        L.append("")
+    # customer questions
+    if a.questions:
+        L.append("## Questions for the customer")
+        L.append("")
+        for i, q in enumerate(dict.fromkeys(a.questions), 1):
+            L.append("%d. %s" % (i, q))
+        L.append("")
     return "\n".join(L) + "\n"
 
 
@@ -2403,6 +3340,10 @@ def main():
     ap.add_argument("bundle", help="bundle directory (collect-ocp-review.sh output)")
     ap.add_argument("-o", "--outdir",
                     help="output directory (default: <bundle>-analysis)")
+    ap.add_argument("--prev", metavar="DIR",
+                    help="previous analysis output dir (reads its "
+                         "findings.json and reports new/resolved/changed "
+                         "findings)")
     ap.add_argument("--version", action="version",
                     version="ocp_analyzer.py %s (bundle format %d, knowledge %s)"
                             % (TOOLKIT_VERSION, BUNDLE_FORMAT,
@@ -2419,13 +3360,48 @@ def main():
     a = Analyzer(Bundle(bdir))
     a.run()
 
+    # cross-run diff: match findings on their stable rule ids
+    prev_diff = None
+    if args.prev:
+        prev_file = Path(args.prev) / "findings.json"
+        try:
+            prev = json.loads(prev_file.read_text())
+            old = {f["id"]: f for f in prev.get("findings", [])}
+            new = {f["id"]: f for f in a.findings}
+            prev_diff = {
+                "new": sorted(new[i]["title"] for i in new.keys() - old.keys()),
+                "resolved": sorted(old[i]["title"]
+                                   for i in old.keys() - new.keys()),
+                "changed": sorted("%s (%s -> %s)" %
+                                  (new[i]["title"], old[i]["sev"],
+                                   new[i]["sev"])
+                                  for i in new.keys() & old.keys()
+                                  if old[i]["sev"] != new[i]["sev"]),
+            }
+        except (OSError, ValueError) as exc:
+            print("warning: cannot diff against %s: %s" % (prev_file, exc),
+                  file=sys.stderr)
+
     reports = {
         "architecture-overview.md": render_overview(a, bdir.name),
-        "issues.md": render_issues(a, bdir.name),
+        "issues.md": render_issues(a, bdir.name, prev_diff),
         "manual-review-guide.md": render_guide(a, bdir.name),
+        "attention-points.md": render_attention(a, bdir.name),
     }
     for name, text in reports.items():
         (outdir / name).write_text(text)
+    coll = a._collection_time()
+    (outdir / "findings.json").write_text(json.dumps({
+        "analyzer": TOOLKIT_VERSION,
+        "knowledge": BUILD_KNOWLEDGE_DATE,
+        "bundle": bdir.name,
+        "collected": coll.strftime("%Y-%m-%dT%H:%M:%SZ") if coll else None,
+        "profile": a.profile.describe(),
+        "findings": a.findings,
+        "suppressed": a.suppressed,
+        "verified_healthy": a.greens,
+        "questions": list(dict.fromkeys(a.questions)),
+    }, indent=1) + "\n")
 
     counts = {}
     for f in a.findings:
@@ -2436,8 +3412,12 @@ def main():
           % (bdir, a.facts.get("collector_version", "?")))
     print("findings        : " + (", ".join(
         "%s=%d" % (s, counts[s]) for s in SEV_ORDER if s in counts) or "none"))
+    if prev_diff:
+        print("vs previous run : new=%d resolved=%d severity-changed=%d"
+              % (len(prev_diff["new"]), len(prev_diff["resolved"]),
+                 len(prev_diff["changed"])))
     print("reports written : %s" % outdir)
-    for name in reports:
+    for name in list(reports) + ["findings.json"]:
         print("   - %s" % name)
 
 

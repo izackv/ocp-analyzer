@@ -118,7 +118,7 @@ openshift-ingress              custom-router-cert          2026-01-25T00:00:00Z 
 
 def make_bundle(tmp, files):
     b = Path(tmp) / "ocp-review_test_20260101-000000"
-    b.mkdir()
+    b.mkdir(exist_ok=True)
     for name, content in files.items():
         (b / name).write_text(content)
     return b
@@ -303,7 +303,17 @@ class TestTopologyCalibration(unittest.TestCase):
             a.check_etcd_backup()
             backup = next(f for f in a.findings
                           if "No backup tooling" in f["title"])
-            self.assertEqual(backup["sev"], "CRITICAL")
+            self.assertEqual(backup["sev"], "HIGH")  # no PVs = nothing stateful
+            # with stateful data present it escalates
+            (Path(t) / "ocp-review_test_20260101-000000" / "04-pv.txt").write_text(
+                "NAME CAP MODE RECLAIM STATUS CLAIM SC\n"
+                "pv1 5Gi RWO Delete Bound app/pg lvms-vg1\n")
+            a2 = oa.Analyzer(oa.Bundle(
+                Path(t) / "ocp-review_test_20260101-000000"))
+            a2.check_etcd_backup()
+            b2 = next(f for f in a2.findings
+                      if "No backup tooling" in f["title"])
+            self.assertEqual(b2["sev"], "CRITICAL")
 
     def test_ha_keeps_ingress_finding_and_high_backup(self):
         with tempfile.TemporaryDirectory() as t:
@@ -380,6 +390,10 @@ items:
 - apiVersion: config.openshift.io/v1
   kind: ClusterVersion
   status:
+    availableUpdates:
+    - image: registry.example.test/release@sha256:new
+      url: https://errata.example.test/RHSA-2026:9999
+      version: 4.16.10
     conditionalUpdates:
     - conditions:
       - lastTransitionTime: "2025-01-01T00:00:00Z"
@@ -600,6 +614,358 @@ class TestOLMExtensions(unittest.TestCase):
             a.check_olm()
             self.assertTrue(any("Superseded and successor" in x
                                 for x in titles(a)))
+
+
+CO_YAML = """apiVersion: v1
+items:
+- apiVersion: config.openshift.io/v1
+  kind: ClusterOperator
+  metadata:
+    name: image-registry
+  status:
+    conditions:
+    - lastTransitionTime: "2026-01-01T00:00:00Z"
+      message: ImagePrunerJobFailed - the image pruner job failed
+      reason: ImagePrunerJobFailed
+      status: "True"
+      type: Degraded
+kind: List
+"""
+
+
+class TestCascade(unittest.TestCase):
+    def _bundle(self, t):
+        return analyzer(t, {
+            "02-nodes-wide.txt":
+                "NAME STATUS ROLES AGE VERSION\n"
+                "w1 NotReady worker 100d v1\nw2 NotReady worker 100d v1\n"
+                "m1 Ready control-plane,master 100d v1\n",
+            "02-nodes-conditions.txt":
+                "NAME READY MEM DISK PID NET TAINTS\n"
+                "w1 Unknown False False False <none> unreachable\n"
+                "w2 Unknown False False False <none> unreachable\n"
+                "m1 True False False False <none> <none>\n",
+            "02-machines.txt":
+                "NAME PHASE TYPE REGION ZONE AGE NODE PROVIDERID STATE\n"
+                "c-w1 Running x r z 100d w1 baremetal:///x unmanaged\n",
+            "01-clusteroperators.txt":
+                "NAME VERSION AVAILABLE PROGRESSING DEGRADED SINCE\n"
+                "image-registry 4.18 True False True 2d\n",
+            "01-clusteroperators.yaml": CO_YAML,
+        })
+
+    def test_outage_root_and_cascade_tagging(self):
+        with tempfile.TemporaryDirectory() as t:
+            a = self._bundle(t)
+            a.check_nodes()
+            root = next(f for f in a.findings if "not Ready" in f["title"])
+            self.assertIn("kubelet stopped reporting", root["evidence"])
+            self.assertIn("unmanaged", root["evidence"])
+            a.check_clusteroperators()
+            co = next(f for f in a.findings if "cluster operator" in f["title"])
+            self.assertTrue(co["cascade"])
+            self.assertIn("ImagePrunerJobFailed", co["evidence"])
+
+    def test_no_outage_no_cascade_and_single_co_high(self):
+        with tempfile.TemporaryDirectory() as t:
+            a = analyzer(t, {
+                "01-clusteroperators.txt":
+                    "NAME VERSION AVAILABLE PROGRESSING DEGRADED SINCE\n"
+                    "image-registry 4.18 True False True 2d\n",
+                "01-clusteroperators.yaml": CO_YAML})
+            a.check_clusteroperators()
+            co = next(f for f in a.findings if "cluster operator" in f["title"])
+            self.assertFalse(co["cascade"])
+            self.assertEqual(co["sev"], "HIGH")  # 1 CO, no outage
+
+
+class TestStorageComposition(unittest.TestCase):
+    def test_db_on_node_local_without_backup_is_critical(self):
+        with tempfile.TemporaryDirectory() as t:
+            a = analyzer(t, {
+                "04-storageclasses.txt":
+                    "NAME PROVISIONER RECLAIM BINDMODE EXPANSION DEFAULT\n"
+                    "lvms-vg1 topolvm.io Delete WaitForFirstConsumer true true\n",
+                "04-pv.txt": "NAME CAP MODE RECLAIM STATUS CLAIM SC\n"
+                             "pv1 5Gi RWO Delete Bound app/pg lvms-vg1\n",
+                "04-pvc.txt": "NS NAME STATUS VOLUME CAP MODE SC AGE\n"
+                              "app postgres-data Bound pv1 5Gi RWO lvms-vg1 10d\n"})
+            a.facts["backup_stack"] = "none detected"
+            a.check_storage()
+            f = next(f for f in a.findings if "node-local" in f["title"])
+            self.assertEqual(f["sev"], "CRITICAL")
+            self.assertIn("NO BACKUP", f["title"])
+
+    def test_zero_pv_pvc_with_events_is_broken_provisioner(self):
+        with tempfile.TemporaryDirectory() as t:
+            a = analyzer(t, {
+                "04-storageclasses.txt":
+                    "NAME PROVISIONER RECLAIM BINDMODE EXPANSION DEFAULT\n"
+                    "lvms-vg1 topolvm.io Delete WaitForFirstConsumer true true\n",
+                "11-events-warning.txt":
+                    "NAMESPACE LAST TYPE REASON OBJECT MESSAGE\n"
+                    "openshift-storage 5m Warning ResourceReconciliationIncomplete "
+                    "lvmcluster/x NoAvailableDevicesForVG on node w1\n"})
+            a.check_storage()
+            f = next(f for f in a.findings if "ZERO PVs" in f["title"])
+            self.assertEqual(f["sev"], "CRITICAL")  # broken DEFAULT class
+            self.assertIn("NON-FUNCTIONAL", f["title"])
+
+
+class TestJobsAndIdleOperators(unittest.TestCase):
+    def test_failed_pruner_with_registry_removed(self):
+        with tempfile.TemporaryDirectory() as t:
+            a = analyzer(t, {
+                "06-jobs.txt": "NAMESPACE NAME STATUS COMPLETIONS DURATION AGE\n"
+                               "openshift-image-registry image-pruner-29 "
+                               "Failed 0/1 2d 2d\n",
+                "07-imageregistry.yaml": "spec:\n  managementState: Removed\n"})
+            a.check_failed_jobs()
+            f = next(f for f in a.findings if "failed platform Job" in f["title"])
+            self.assertIn("prunes nothing", f["risk"])
+            self.assertIn("Suspend the pruner", f["rec"])
+
+    def test_idle_operator(self):
+        with tempfile.TemporaryDirectory() as t:
+            a = analyzer(t, {
+                "05-csv.txt": "NS NAME DISPLAY VERSION PHASE\n"
+                              "openshift-operators-redhat loki-operator.v6.1 "
+                              "Loki 6.1 Succeeded\n",
+                "08-lokistack.txt": "(empty result)\n"})
+            a.check_idle_operators()
+            f = next(f for f in a.findings if "no configured" in f["title"])
+            self.assertIn("loki-operator", f["evidence"])
+
+
+class TestIdentityPath(unittest.TestCase):
+    def test_circular_idp_and_kubeadmin_gating(self):
+        with tempfile.TemporaryDirectory() as t:
+            a = analyzer(t, {
+                "07-oauth.yaml":
+                    "spec:\n  identityProviders:\n"
+                    "  - mappingMethod: add\n    name: sso\n    type: OpenID\n"
+                    "    openID:\n"
+                    "      issuer: https://sso.apps.c.example.test/realms/r\n",
+                "01-ingress-config.yaml": "spec:\n  domain: apps.c.example.test\n",
+                "01-dns.yaml": "spec:\n  baseDomain: c.example.test\n",
+                "07-users.txt": "(empty result)\n",
+                "07-kubeadmin-exists.txt": "kubeadmin   Opaque   1   400d\n"})
+            a.check_identity_path()
+            self.assertTrue(any("circular dependency" in x for x in titles(a)))
+            self.assertTrue(any("no user has ever logged in" in x
+                                for x in titles(a)))
+            self.assertTrue(any("mappingMethod 'add'" in x for x in titles(a)))
+            self.assertTrue(a.facts["idp_fragile"])
+            a.check_security()
+            kub = next(f for f in a.findings if "kubeadmin" in f["title"])
+            self.assertIn("KEEP it for now", kub["rec"])
+
+    def test_foreign_cluster_idp(self):
+        with tempfile.TemporaryDirectory() as t:
+            a = analyzer(t, {
+                "07-oauth.yaml":
+                    "spec:\n  identityProviders:\n"
+                    "  - name: sso\n    type: OpenID\n    openID:\n"
+                    "      issuer: https://sso.apps.other.example.test/r\n",
+                "01-ingress-config.yaml": "spec:\n  domain: apps.c.example.test\n",
+                "01-dns.yaml": "spec:\n  baseDomain: c.example.test\n"})
+            a.check_identity_path()
+            self.assertTrue(any("ANOTHER" in x for x in titles(a)))
+
+    def test_orphaned_identities(self):
+        with tempfile.TemporaryDirectory() as t:
+            a = analyzer(t, {
+                "07-oauth.yaml": "spec:\n  identityProviders:\n"
+                                 "  - name: current-idp\n    type: OpenID\n",
+                "07-identities.txt":
+                    "NAME IDPNAME IDPUSER USER UID\n"
+                    "old-ldap:u1 old-ldap u1 alice 123\n"
+                    "current-idp:u2 current-idp u2 bob 456\n"})
+            a.check_identity_path()
+            f = next(f for f in a.findings if "removed identity" in f["title"])
+            self.assertIn("old-ldap", f["title"])
+            self.assertNotIn("current-idp", f["title"])
+
+
+class TestCertReferences(unittest.TestCase):
+    def test_referenced_cert_unobservable(self):
+        with tempfile.TemporaryDirectory() as t:
+            a = analyzer(t, {
+                "03-ingresscontroller.yaml":
+                    "spec:\n  defaultCertificate:\n    name: custom-ingress-cert\n",
+                "07-cert-expiry.txt":
+                    "NS NAME NOT-AFTER ISSUER\n"
+                    "openshift-ingress custom-ingress-cert <none> <none>\n"})
+            a.check_cert_expiry()
+            f = next(f for f in a.findings if "UNOBSERVABLE" in f["title"])
+            self.assertIn("custom-ingress-cert", f["evidence"])
+
+
+class TestBackupWindowAndAlertCorrelation(unittest.TestCase):
+    def test_failure_window_feeds_alerting_finding(self):
+        with tempfile.TemporaryDirectory() as t:
+            a = analyzer(t, {
+                "10-cronjobs.txt":
+                    "NAMESPACE NAME SCHEDULE TIMEZONE SUSPEND ACTIVE LAST AGE\n"
+                    "backup-ns etcd-backup 0 2 * * * <none> False 0 20h 300d\n",
+                "06-pods-all.txt":
+                    "NAMESPACE NAME READY STATUS RESTARTS AGE\n"
+                    "backup-ns etcd-backup-1 0/1 Error 0 6d\n"
+                    "backup-ns etcd-backup-2 0/1 Error 0 5d\n"
+                    "backup-ns etcd-backup-3 0/1 Completed 0 76d\n"})
+            a.check_etcd_backup()
+            b = next(f for f in a.findings if "Backup job pods" in f["title"])
+            self.assertIn("AT LEAST ~6 days", b["evidence"])
+            a.check_monitoring()
+            alert = next(f for f in a.findings if "reach a human" in f["title"])
+            self.assertEqual(alert["sev"], "HIGH")
+            self.assertIn("Empirical signal", alert["evidence"])
+
+
+class TestImagePullStratification(unittest.TestCase):
+    def test_fresh_vs_chronic(self):
+        pods = ("NAMESPACE NAME READY STATUS RESTARTS AGE\n"
+                "a old-1 0/1 ImagePullBackOff 0 90d\n"
+                "a old-2 0/1 ImagePullBackOff 0 45d\n"
+                "b new-1 0/1 ImagePullBackOff 0 3d\n")
+        with tempfile.TemporaryDirectory() as t:
+            a = analyzer(t, {"06-pods-all.txt": pods,
+                             "01-clusterversion.yaml":
+                                 "status:\n  conditions:\n"
+                                 "  - reason: RemoteFailed\n"
+                                 "    type: RetrievedUpdates\n"})
+            f_ = None
+            a.check_pods()
+            f_ = next(f for f in a.findings if "image pulls" in f["title"])
+            self.assertIn("2 chronic", f_["title"])
+            self.assertIn("1 RECENT", f_["title"])
+            self.assertIn("MIRROR-REGISTRY DRIFT", f_["risk"])
+
+
+RECENT_CO_YAML = """apiVersion: v1
+items:
+- apiVersion: config.openshift.io/v1
+  kind: ClusterOperator
+  metadata:
+    name: authentication
+  status:
+    conditions:
+    - lastTransitionTime: "2025-12-31T20:00:00Z"
+      message: recovered
+      reason: AsExpected
+      status: "False"
+      type: Degraded
+    - lastTransitionTime: "2025-12-31T21:00:00Z"
+      message: back
+      reason: AsExpected
+      status: "True"
+      type: Available
+kind: List
+"""
+
+
+class TestRecentTransitions(unittest.TestCase):
+    def test_recent_recovery_detected_on_green_cluster(self):
+        # collection time is 20260101-000000; transitions 3-4h earlier
+        with tempfile.TemporaryDirectory() as t:
+            a = analyzer(t, {"01-clusteroperators.yaml": RECENT_CO_YAML})
+            a.check_recent_transitions()
+            f = next(f for f in a.findings if "recent incident" in f["title"])
+            self.assertIn("authentication", f["evidence"])
+
+    def test_old_transitions_stay_silent(self):
+        with tempfile.TemporaryDirectory() as t:
+            a = analyzer(t, {"01-clusteroperators.yaml":
+                             RECENT_CO_YAML.replace("2025-12-31", "2025-01-01")})
+            a.check_recent_transitions()
+            self.assertFalse(any("recent incident" in x for x in titles(a)))
+
+    def test_mass_restart_signature(self):
+        pods = "NAMESPACE NAME READY STATUS RESTARTS AGE\n" + "".join(
+            "ns%d pod%d 1/1 Running 3 (5h ago) 90d\n" % (i, i)
+            for i in range(12))
+        with tempfile.TemporaryDirectory() as t:
+            a = analyzer(t, {"06-pods-all.txt": pods})
+            a.check_recent_transitions()
+            self.assertTrue(any("mass-restart" in x for x in titles(a)))
+
+
+class TestRuleIdsAndReports(unittest.TestCase):
+    def test_rule_id_stable_across_counts(self):
+        with tempfile.TemporaryDirectory() as t:
+            a1 = analyzer(t, {})
+            a1._check = "check_pods"
+            a1.add("HIGH", "Workloads", "3 pod(s) failing image pulls",
+                   "e", "r", "rec")
+            a2 = analyzer(t, {})
+            a2._check = "check_pods"
+            a2.add("HIGH", "Workloads", "17 pod(s) failing image pulls",
+                   "e", "r", "rec")
+            self.assertEqual(a1.findings[0]["id"], a2.findings[0]["id"])
+            self.assertTrue(a1.findings[0]["id"].startswith("pods/"))
+
+    def test_issues_render_has_top_priorities_greens_and_appendix(self):
+        with tempfile.TemporaryDirectory() as t:
+            a = analyzer(t, {
+                "01-clusteroperators.txt":
+                    "NAME VERSION AVAILABLE PROGRESSING DEGRADED SINCE\n"
+                    "etcd 4.18 True False False 100d\n",
+                "07-etcd-encryption.txt": "aesgcm",
+            })
+            a.run()
+            text = oa.render_issues(a, "b")
+            self.assertIn("## Top priorities", text)
+            self.assertIn("## Verified healthy", text)
+            self.assertIn("All 1 cluster operators Available", text)
+            self.assertIn("etcd encryption at rest enabled: aesgcm", text)
+            self.assertIn("## Evidence file reference", text)
+            self.assertIn("oc get clusteroperators", text)
+
+    def test_attention_points_questions_and_secret_scan(self):
+        with tempfile.TemporaryDirectory() as t:
+            a = analyzer(t, {
+                "07-imageregistry.yaml": "spec:\n  managementState: Removed\n",
+                "08-leaky.yaml":
+                    "data:\n  clientSecret: c3VwZXJzZWNyZXR2YWx1ZTEyMw\n",
+            })
+            a.run()
+            text = oa.render_attention(a, "b")
+            self.assertIn("Questions for the customer", text)
+            self.assertIn("Removed state", text)
+            self.assertIn("08-leaky.yaml", text)
+            self.assertIn("sanitize-ocp-bundle.py", text)
+            self.assertIn("Verify before presenting", text)
+
+
+class TestCrossRunDiff(unittest.TestCase):
+    def test_prev_diff_resolved_and_new(self):
+        import subprocess
+        with tempfile.TemporaryDirectory() as t:
+            b1 = make_bundle(t, {"07-kubeadmin-exists.txt":
+                                 "secret/kubeadmin\n"})
+            out1 = Path(t) / "out1"
+            subprocess.run([sys.executable, str(REPO / "ocp_analyzer.py"),
+                            str(b1), "-o", str(out1)], check=True,
+                           capture_output=True)
+            self.assertTrue((out1 / "findings.json").exists())
+            self.assertTrue((out1 / "attention-points.md").exists())
+            # second bundle: kubeadmin gone, pending CSR appeared
+            b2 = Path(t) / "ocp-review_test2_20260102-000000"
+            b2.mkdir()
+            (b2 / "02-csr.txt").write_text(
+                "NAME AGE SIGNER REQUESTOR CONDITION\n"
+                "csr-x 5m kubelet node:w1 Pending\n")
+            out2 = Path(t) / "out2"
+            r = subprocess.run([sys.executable, str(REPO / "ocp_analyzer.py"),
+                                str(b2), "-o", str(out2),
+                                "--prev", str(out1)], check=True,
+                               capture_output=True, text=True)
+            self.assertIn("vs previous run", r.stdout)
+            issues = (out2 / "issues.md").read_text()
+            self.assertIn("## Changes since previous run", issues)
+            self.assertIn("Resolved", issues)
+            self.assertIn("kubeadmin", issues)
+            self.assertIn("New", issues)
 
 
 class TestFullRunSmoke(unittest.TestCase):

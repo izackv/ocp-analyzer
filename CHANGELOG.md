@@ -28,6 +28,31 @@ AI skill reviews of the same bundles (7 lab server-runs + 1 production):
   data-egress inventory, foreign route hostnames, OLM hygiene
   (InstallPlan-chain dedup, catalog usage, floating channels, operator
   remnants and superseded pairs), naming hygiene, rate-aware restarts.
+- Correlation checks: node-outage cascade consolidation (one root finding,
+  downstream symptoms tagged; kubelet-Unknown and Machine-API-remediation
+  context), operator condition messages surfaced with core-vs-peripheral
+  severity, and failed platform Jobs tied to degraded operators.
+- Composite findings that join files: databases on node-local storage
+  without backup, StorageClass functional validation (zero PV/PVC +
+  provisioner events/DaemonSet health), backup-failure window dating that
+  empirically upgrades the alert-delivery finding, image-pull age
+  stratification with mirror-drift framing, certificates referenced by
+  config but invisible to the expiry report.
+- Identity-path analysis: circular (own-ingress) and cross-cluster IdP
+  dependencies, unproven IdPs, orphaned identities, cluster-admin subject
+  resolution - and kubeadmin-removal advice now inverts to "keep as
+  break-glass" while the identity path is fragile.
+- Temporal forensics: recent condition transitions (a green cluster that
+  recovered hours ago is reported as a recent incident), mass-restart and
+  mass-pod-recreation signatures.
+- Machine-readable `findings.json` (stable rule ids) and `--prev DIR` for
+  cross-run diffs (new / resolved / severity-changed) rendered into
+  issues.md.
+- Report shape: Top-priorities list, verified-healthy ledger, per-file
+  `oc`-command evidence appendix, and a bundle-specific
+  `attention-points.md` (collection anomalies, heuristic-findings review
+  list, auto-generated customer questions, freshness + confidentiality
+  notes with a secret-content scan).
 - Analyzer unit tests (`tests/test_analyzer.py`, synthetic fixtures only).
 
 ### Fixed
