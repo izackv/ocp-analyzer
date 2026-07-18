@@ -4,7 +4,42 @@ All notable changes to this toolkit are recorded here. Dates are ISO (YYYY-MM-DD
 
 ## [Unreleased]
 
+### Added
+
+Analyzer overhaul, driven by a gap analysis of the script's reports vs
+AI skill reviews of the same bundles (7 lab server-runs + 1 production):
+
+- Cluster-profile severity calibration: topology (SNO vs HA), connectivity,
+  tenant-vs-platform namespaces and cluster age now scale or suppress
+  findings; suppressions are listed in an auditable ledger and a
+  `Calibration:` line heads issues.md.
+- Tri-state data semantics: `.err`/empty files are classified
+  verified-absent / defaults-in-effect / collection-FAILED; failed
+  collections raise explicit blind-spot findings and the overview gains a
+  "Data availability" section.
+- Stock-object baselines: shipped cluster-admin bindings whitelisted,
+  custom SCCs risk-scored beyond the PRIV column (with operator
+  attribution), one-shot installer pods triaged out, auto-rotated platform
+  certs separated from manually managed ones.
+- ~15 new checks promoting already-collected data into findings, incl.
+  upgrade posture (Failing/Upgradeable, patch staleness, RHSA backlog),
+  warning-event mining (OOM, scheduling, etcd disk latency), pending CSRs,
+  failure-domain inference, monitoring-stack health and persistence,
+  data-egress inventory, foreign route hostnames, OLM hygiene
+  (InstallPlan-chain dedup, catalog usage, floating channels, operator
+  remnants and superseded pairs), naming hygiene, rate-aware restarts.
+- Analyzer unit tests (`tests/test_analyzer.py`, synthetic fixtures only).
+
 ### Fixed
+
+- Four dead or misleading analyzer checks: the `00-access.txt`
+  write-permission check never matched real output; "Version history" was
+  mined from `availableUpdates` instead of `status.history`; the
+  etcd-encryption check was skipped by the "(empty result)" marker; the
+  alert-forwarding finding cited a file that was never collected.
+  OAuth checks are now scoped to the active `spec:` (historical config in
+  annotations no longer raises HIGH), and blank lines no longer skew
+  counts.
 
 - `unpack-bundle.sh`: intermittent exit 141 on Linux (GNU tar receiving
   SIGPIPE from `tar -tzf | head -1` under `set -o pipefail`, after a

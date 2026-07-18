@@ -41,11 +41,53 @@ BUNDLE_FORMAT = 2
 # Static knowledge baked in at build time - verify against current Red Hat docs.
 BUILD_KNOWLEDGE_DATE = "2026-07"
 EUS_MINORS = {"4.12", "4.14", "4.16", "4.18", "4.20"}   # even minors are EUS
+# ClusterRoleBindings to cluster-admin that ship with OCP 4.x (in addition to
+# every system:* and system:openshift:* binding).
 DEFAULT_CLUSTER_ADMIN_CRBS = {
     "cluster-admin", "cluster-admins",
+    "cluster-version-operator", "cluster-network-operator",
+    "cluster-storage-operator-role", "storage-version-migration-migrator",
+    "custom-account-openshift-machine-config-operator",
+    "default-account-cluster-network-operator",
 }
 # `restricted` SCC defaults on OCP 4.11+ (columns of `oc get scc`)
 RESTRICTED_SCC_DEFAULT_SELINUX = "MustRunAs"
+# SCCs shipped with OCP 4.x (platform + default operators)
+STOCK_SCCS = {
+    "anyuid", "hostaccess", "hostmount-anyuid", "hostmount-anyuid-v2",
+    "hostnetwork", "hostnetwork-v2", "machine-api-termination-handler",
+    "node-exporter", "nonroot", "nonroot-v2", "privileged", "restricted",
+    "restricted-v2",
+}
+# custom-SCC name prefix -> keyword expected among installed CSVs
+# (05-csv.txt); a match attributes the SCC to that operator.
+OPERATOR_SCC_HINTS = [
+    ("lvms-", "lvms"), ("rook-ceph", "ocs-operator|odf-operator|rook"),
+    ("trident", "trident"), ("noobaa", "noobaa|mcg-operator"),
+    ("insights-runtime-extractor", "insights"),
+    ("nvidia", "gpu-operator"), ("sriov", "sriov"),
+    ("stackrox|rhacs", "rhacs|stackrox"), ("elasticsearch", "elasticsearch"),
+]
+# capabilities that make an SCC root-equivalent-ish even with PRIV=false
+DANGEROUS_CAPS_RE = re.compile(
+    r"NET_ADMIN|SYS_ADMIN|SYS_PTRACE|SYS_MODULE|\bALL\b|\"\*\"", re.I)
+# control-plane pods that legitimately end in Error/Completed once and stay
+ONE_SHOT_POD_RE = re.compile(
+    r"^(installer-\d+-|revision-pruner-\d+-|collect-profiles-\d+)")
+# cert issuers that OCP rotates automatically (short-lived by design)
+AUTOROTATED_ISSUER_RE = re.compile(
+    r"kube-apiserver|kube-control-plane-signer|kube-csr-signer|csr-signer|"
+    r"aggregator|service-ca|ingress-operator|node-system-admin|"
+    r"loadbalancer-serving|localhost-serving|service-network-serving", re.I)
+PLATFORM_NS_RE = re.compile(r"^(openshift($|-)|kube-|default$)")
+
+# per-file collection status (tri-state semantics for .err / empty files)
+S_OK = "ok"                        # file present with content
+S_EMPTY = "empty"                  # present, "(empty result)" = verified zero
+S_MISSING = "missing"              # not collected (older collector?)
+S_ERR_ABSENT = "verified-absent"   # .err: resource type not on the cluster
+S_ERR_NOTFOUND = "not-configured"  # .err: named object absent = defaults
+S_ERR_FAILED = "collection-failed" # .err: request failed = data UNKNOWN
 
 
 # --------------------------------------------------------------------------- #
@@ -83,11 +125,36 @@ class Bundle(object):
         t = self.read(name)
         if t is None or t.startswith("(empty result)"):
             return []
-        out = t.splitlines()
+        out = [l for l in t.splitlines() if l.strip()]
         return out[1:] if (skip_header and out) else out
 
     def exists(self, name):
         return self.read(name) is not None
+
+    def err_text(self, name):
+        """Content of the sibling .err file, or None."""
+        for candidate in [name] + self.ALIASES.get(name, []):
+            f = self.path / (candidate + ".err")
+            if f.is_file():
+                return f.read_text(errors="replace")
+        return None
+
+    def status(self, name):
+        """Classify a bundle file: S_OK/S_EMPTY/S_MISSING/S_ERR_*."""
+        t = self.read(name)
+        if t is not None:
+            if t.startswith("(empty result)") or not t.strip():
+                return S_EMPTY
+            return S_OK
+        err = self.err_text(name)
+        if err is None:
+            return S_MISSING
+        if re.search(r"doesn't have a resource type|no matches for kind|"
+                     r"could not find the requested resource", err):
+            return S_ERR_ABSENT
+        if "NotFound" in err or "not found" in err:
+            return S_ERR_NOTFOUND
+        return S_ERR_FAILED
 
 
 def parse_age_days(s):
@@ -119,13 +186,137 @@ def yaml_grab(text, key):
     return m.group(1).strip("'\"") if m else None
 
 
+def yaml_block(text, key):
+    """Lines of the first block under `key:` (everything indented deeper).
+
+    Indentation-based, so it distinguishes e.g. the real `spec:` block from
+    the same keys inside a last-applied-configuration annotation.
+    """
+    lines = (text or "").splitlines()
+    for i, line in enumerate(lines):
+        m = re.match(r"^(\s*)%s:\s*$" % re.escape(key), line)
+        if m is None:
+            continue
+        ind = len(m.group(1))
+        out = []
+        for nxt in lines[i + 1:]:
+            if not nxt.strip():
+                out.append(nxt)
+                continue
+            nxt_ind = len(nxt) - len(nxt.lstrip())
+            # block members are indented deeper, EXCEPT list items, which
+            # YAML allows at the same indent as their key ("history:\n- x")
+            if nxt_ind < ind or (nxt_ind == ind
+                                 and not nxt.lstrip().startswith("- ")):
+                break
+            out.append(nxt)
+        return "\n".join(out)
+    return ""
+
+
+def parse_conditions(text, all_blocks=False):
+    """Condition dicts from `conditions:` block(s) of a YAML text.
+
+    Returns [{'type':..,'status':..,'reason':..,'message':..,
+    'lastTransitionTime':..}, ...]; multi-line messages are joined.
+    With all_blocks=True every conditions: block in the text is parsed
+    (needed when nested blocks precede the interesting one, e.g.
+    ClusterVersion conditionalUpdates) - filter the result by type.
+    """
+    if all_blocks:
+        out, rest = [], text or ""
+        while True:
+            m = re.search(r"^\s*conditions:\s*$", rest, re.M)
+            if not m:
+                return out
+            out.extend(parse_conditions(rest[m.start():]))
+            rest = rest[m.end():]
+    conds, cur = [], None
+    for line in yaml_block(text, "conditions").splitlines():
+        s = line.strip()
+        if s.startswith("- "):
+            if cur:
+                conds.append(cur)
+            cur = {}
+            s = s[2:]
+        if cur is None:
+            continue
+        m = re.match(r"(lastTransitionTime|message|reason|status|type):"
+                     r"\s*(.*)$", s)
+        if m:
+            cur[m.group(1)] = m.group(2).strip("'\"")
+        elif "message" in cur and s:
+            cur["message"] += " " + s          # folded continuation line
+    if cur:
+        conds.append(cur)
+    return conds
+
+
+def parse_iso_time(s):
+    try:
+        return datetime.strptime((s or "").strip('"'), "%Y-%m-%dT%H:%M:%SZ")
+    except (ValueError, TypeError):
+        return None
+
+
+# --------------------------------------------------------------------------- #
+# cluster profile - context every check calibrates against
+# --------------------------------------------------------------------------- #
+class Profile(object):
+    """Deterministic cluster archetype derived from the bundle.
+
+    Drives severity calibration: findings inherent to the topology are
+    suppressed or reweighted, coverage ratios run over tenant namespaces
+    only, and absence-of-backup escalates on SNO.
+    """
+
+    def __init__(self, bundle):
+        infra = bundle.read("01-infrastructure.yaml") or ""
+        self.cp_topology = yaml_grab(infra, "controlPlaneTopology") or "?"
+        self.infra_topology = yaml_grab(infra, "infrastructureTopology") or "?"
+        self.sno = self.cp_topology == "SingleReplica"
+        cv = bundle.read("01-clusterversion.yaml") or ""
+        # a mirrors FILE always exists; only actual mirror entries count
+        mirrors = ((bundle.read("01-mirrors-idms.yaml") or "")
+                   + (bundle.read("01-mirrors-icsp.yaml") or ""))
+        self.disconnected = bool(
+            re.search(r"reason:\s*RemoteFailed", cv)
+            or "mirrors:" in mirrors)
+        names = [l.split()[0] for l in bundle.lines("06-projects.txt")
+                 if l.split()]
+        self.tenant_namespaces = [n for n in names
+                                  if not PLATFORM_NS_RE.match(n)]
+        self.namespace_count = len(names)
+        # install date = completionTime of the OLDEST history entry
+        times = [parse_iso_time(t) for t in re.findall(
+            r"completionTime:\s*(\S+)", yaml_block(cv, "history"))]
+        times = [t for t in times if t]
+        self.install_date = min(times) if times else None
+        self.last_update = max(times) if times else None
+
+    def describe(self):
+        parts = ["control plane: %s" % self.cp_topology]
+        if self.sno:
+            parts.append("single-node (SNO) - severity calibrated: "
+                         "single-replica findings inherent to SNO are "
+                         "suppressed or downgraded")
+        parts.append("connectivity: %s" %
+                     ("disconnected/mirrored" if self.disconnected
+                      else "connected (no mirror/proxy signals)"))
+        parts.append("tenant namespaces: %d of %d"
+                     % (len(self.tenant_namespaces), self.namespace_count))
+        return "; ".join(parts)
+
+
 # --------------------------------------------------------------------------- #
 # analyzer
 # --------------------------------------------------------------------------- #
 class Analyzer(object):
     def __init__(self, bundle):
         self.b = bundle
+        self.profile = Profile(bundle)
         self.findings = []        # list of dicts
+        self.suppressed = []      # (title, reason) dropped by calibration
         self.facts = {}           # for the overview
         self.assumptions = [
             "YAML files are mined with regular expressions (Python stdlib has "
@@ -142,13 +333,17 @@ class Analyzer(object):
             "time only; restart counts, alerts and pod states may differ now.",
         ]
 
-    # ---- finding helper ----------------------------------------------------
+    # ---- finding helpers ---------------------------------------------------
     def add(self, sev, area, title, evidence, risk, rec, assumption=None):
         self.findings.append({
             "sev": sev, "area": area, "title": title,
             "evidence": evidence, "risk": risk, "rec": rec,
             "assumption": assumption,
         })
+
+    def suppress(self, title, reason):
+        """Record a finding dropped by profile calibration (auditable)."""
+        self.suppressed.append((title, reason))
 
     # ---- individual checks -------------------------------------------------
     def check_meta(self):
@@ -182,9 +377,11 @@ class Analyzer(object):
         m = re.search(r"## server\n(\S+)", t)
         if m:
             self.facts["api_url"] = m.group(1)
-        # the 'yes' following the create-clusterrolebindings question
-        m = re.search(r"create clusterrolebindings[^\n]*\n(?:[^\n]*\n)?(yes|no)", t)
-        if m and m.group(1) == "yes":
+        # the yes/no anywhere inside the create-clusterrolebindings section
+        # (real output holds Warning + blank lines before the answer)
+        m = re.search(r"##[^\n]*create clusterrolebindings[^\n]*\n(.*?)(?=\n## |\Z)",
+                      t, re.S)
+        if m and re.search(r"^yes\s*$", m.group(1), re.M):
             self.add("MEDIUM", "Process",
                      "Collection account has cluster write permissions",
                      "00-access.txt: `oc auth can-i create clusterrolebindings` "
@@ -264,10 +461,15 @@ class Analyzer(object):
                      "Ensure a documented process exists for mirroring new "
                      "releases and checking upgrade paths (e.g. via the "
                      "offline update-path tool).")
-        # history versions for the overview
-        hist = re.findall(r"^\s+version:\s*(\d+\.\d+\.\d+)\s*$", t, re.M)
+        # history versions for the overview - ONLY the status.history block
+        # (a bare version: regex would also harvest availableUpdates/desired)
+        hist_block = yaml_block(t, "history")
+        hist = re.findall(r"^\s+version:\s*(\d+\.\d+\.\S+)\s*$", hist_block, re.M)
         if hist:
             self.facts["version_history"] = list(dict.fromkeys(hist))
+        if self.profile.install_date:
+            self.facts["install_date"] = \
+                self.profile.install_date.strftime("%Y-%m-%d")
         # release image mirror
         img = yaml_grab(t, "image")
         if img and "/" in img:
@@ -314,19 +516,28 @@ class Analyzer(object):
                      "rescheduled.",
                      "Investigate kubelet/network/storage on the affected "
                      "nodes.")
-        # master sizing heuristic
+        # master sizing - masters identified by their ROLES column, with a
+        # hostname fallback for older bundles; thresholds depend on topology
+        masters = {n for r, nodes in roles.items() for n in nodes
+                   if "master" in r or "control-plane" in r}
+        min_cpu, min_mem = (8, 15) if self.profile.sno else (16, 63)
         caps = self.b.lines("02-nodes-capacity.txt")
         masters_small = []
         for line in caps:
             tok = line.split()
-            if len(tok) >= 3 and ("mst" in tok[0] or "master" in tok[0]):
-                try:
-                    cpu = int(tok[1])
-                    mem_gib = int(re.sub(r"\D", "", tok[2])) / (1024 * 1024)
-                except ValueError:
-                    continue
-                if cpu < 16 or mem_gib < 63:
-                    masters_small.append("%s: %d vCPU / %.0f GiB" % (tok[0], cpu, mem_gib))
+            if len(tok) < 3:
+                continue
+            is_master = (tok[0] in masters if masters
+                         else ("mst" in tok[0] or "master" in tok[0]))
+            if not is_master:
+                continue
+            try:
+                cpu = int(tok[1])
+                mem_gib = int(re.sub(r"\D", "", tok[2])) / (1024 * 1024)
+            except ValueError:
+                continue
+            if cpu < min_cpu or mem_gib < min_mem:
+                masters_small.append("%s: %d vCPU / %.0f GiB" % (tok[0], cpu, mem_gib))
         if masters_small:
             self.add("MEDIUM", "Capacity",
                      "Control-plane nodes may be undersized",
@@ -336,10 +547,11 @@ class Analyzer(object):
                      "Compare against Red Hat control-plane sizing guidance "
                      "for this cluster's node/pod/CRD count; plan a resize if "
                      "utilization (02-top-nodes.txt) is high.",
-                     assumption="Threshold used: <16 vCPU or <64 GiB flags a "
-                                "master as 'small' for a multi-tenant "
-                                "production cluster; master nodes are matched "
-                                "by 'mst'/'master' in the hostname.")
+                     assumption="Threshold used: <%d vCPU or <%d GiB for a "
+                                "%s cluster; masters matched by node role."
+                                % (min_cpu, min_mem + 1,
+                                   "single-node" if self.profile.sno
+                                   else "multi-tenant production"))
         # utilization
         top = self.b.lines("02-top-nodes.txt")
         hot = []
@@ -381,29 +593,52 @@ class Analyzer(object):
         if not rows:
             return
         status_count, restarts, pull_fail = {}, [], []
+        one_shot = 0
         for line in rows:
             tok = line.split()
             if len(tok) < 5:
                 continue
             ns, name, status = tok[0], tok[1], tok[3]
             if status not in ("Running", "Completed"):
-                status_count[status] = status_count.get(status, 0) + 1
+                if status == "Error" and ONE_SHOT_POD_RE.match(name):
+                    # superseded static-pod installers/pruners: benign leftovers
+                    one_shot += 1
+                else:
+                    status_count[status] = status_count.get(status, 0) + 1
             if "ImagePull" in status or "ErrImage" in status:
                 pull_fail.append("%s/%s" % (ns, name))
-            if tok[4].isdigit() and int(tok[4]) >= 100:
-                restarts.append((int(tok[4]), "%s/%s" % (ns, name), status))
+            if tok[4].isdigit() and int(tok[4]) > 0:
+                # RESTARTS may be "5 (3d14h ago)" - recency in tok[5..6];
+                # AGE is the column after the optional recency
+                count = int(tok[4])
+                recent = tok[5].lstrip("(") if (len(tok) > 5 and
+                                                tok[5].startswith("(")) else ""
+                age_col = tok[7] if recent and len(tok) > 7 else \
+                    (tok[5] if len(tok) > 5 else "")
+                age_days = parse_age_days(age_col)
+                rate = count / age_days if age_days >= 1 else count
+                if count >= 100 or (rate >= 10 and count >= 20):
+                    restarts.append((count, "%s/%s" % (ns, name), status,
+                                     recent, rate))
         self.facts["pod_total"] = len(rows)
         self.facts["pod_not_running"] = status_count
         if restarts:
             restarts.sort(reverse=True)
-            top = ["%s restarts=%d (%s)" % (n, c, s) for c, n, s in restarts[:6]]
+            top = ["%s restarts=%d (%s%s, ~%.1f/day)"
+                   % (n, c, s, ", last %s ago" % r if r else "", rt)
+                   for c, n, s, r, rt in restarts[:6]]
             self.add("HIGH", "Workloads",
-                     "%d pod(s) with >=100 restarts" % len(restarts),
+                     "%d pod(s) with excessive restarts" % len(restarts),
                      "06-pods-all.txt: " + "; ".join(top),
                      "Crash-looping workloads burn resources, hide real "
                      "incidents and indicate unhealthy applications.",
                      "Triage with the app owners; fix or remove the top "
-                     "offenders.")
+                     "offenders.",
+                     assumption="Flagged at >=100 total restarts OR a rate "
+                                ">=10/day with >=20 restarts (restart count "
+                                "normalized by pod age - a steady trickle "
+                                "over years is different from an active "
+                                "crash loop).")
         if pull_fail:
             self.add("HIGH", "Workloads",
                      "%d pod(s) failing image pulls" % len(pull_fail),
@@ -424,7 +659,18 @@ class Analyzer(object):
                      "06-pods-all.txt: CrashLoopBackOff=%d, Error=%d." % (crash, errors),
                      "Failing workloads; Error pods from CronJobs often mean "
                      "silently broken scheduled tasks.",
-                     "Review each; see also the backup check below.")
+                     "Review each; see also the backup check below.",
+                     assumption="One-shot control-plane pods (installer-*, "
+                                "revision-pruner-*, collect-profiles-*) are "
+                                "excluded as benign leftovers%s."
+                                % (" (%d such pod(s) in this bundle)" % one_shot
+                                   if one_shot else ""))
+        if one_shot > 10:
+            self.add("LOW", "Hygiene",
+                     "%d superseded installer/pruner pods linger" % one_shot,
+                     "06-pods-all.txt: Error-state one-shot control-plane pods.",
+                     "Cosmetic, but clutters pod listings and monitoring.",
+                     "Prune with `oc adm prune` or ignore; no action urgent.")
         stale = status_count.get("ContainerStatusUnknown", 0) + \
             sum(v for k, v in status_count.items() if k.startswith("Init"))
         if stale > 10:
@@ -483,14 +729,33 @@ class Analyzer(object):
                              ("Kasten K10", has_kasten),
                              ("custom CronJobs", bool(backup_ns))) if ok]) or "none detected"
         if not (has_oadp or has_velero or has_kasten or backup_ns):
-            self.add("HIGH", "Backup/DR",
+            # tri-state: .err "no resource type" PROVES the product is not
+            # installed; a missing file only means "not collected"
+            absent = [n for n in ("10-oadp-dpa.txt", "10-velero-crs.txt",
+                                  "10-kasten-policies.txt")
+                      if self.b.status(n) == S_ERR_ABSENT]
+            fg = self.b.read("10-etcd-backup-fg.txt") or \
+                self.b.read("01-featuregate.yaml") or ""
+            no_fg = "AutomatedEtcdBackup" not in fg
+            sev = "CRITICAL" if self.profile.sno else "HIGH"
+            self.add(sev, "Backup/DR",
                      "No backup tooling detected on the cluster",
                      "10-*: no OADP DataProtectionApplication, no Velero CRs, "
-                     "no Kasten policies, no backup-named CronJobs.",
+                     "no Kasten policies, no backup-named CronJobs."
+                     + (" CRDs verified ABSENT (not installed): %s."
+                        % ", ".join(absent) if absent else "")
+                     + (" AutomatedEtcdBackup feature gate not enabled."
+                        if no_fg else ""),
                      "No apparent path to restore applications or etcd after "
-                     "data loss.",
+                     "data loss."
+                     + (" On a single-node cluster the lone etcd member IS "
+                        "the cluster: losing its disk without a backup is "
+                        "total, unrecoverable cluster loss."
+                        if self.profile.sno else ""),
                      "Confirm with the customer how (or whether) this cluster "
-                     "is backed up; external agents would not be visible here.",
+                     "is backed up; external agents would not be visible here."
+                     + (" Interim: run cluster-backup.sh to OFF-node storage "
+                        "and schedule it." if self.profile.sno else ""),
                      assumption="Backup products visible only via their "
                                 "cluster CRs; external/agent-based backup "
                                 "cannot be detected from this bundle.")
@@ -554,29 +819,83 @@ class Analyzer(object):
                                 "database keywords - verify the actual "
                                 "workload before migrating.")
 
+    # operator pairs where the first is superseded by the second - both
+    # installed usually means an unfinished migration
+    SUPERSEDED_PAIRS = [
+        (r"rhsso-operator", r"rhbk-operator|keycloak-operator",
+         "RH SSO 7.x is superseded by RH build of Keycloak"),
+        (r"elasticsearch-operator", r"loki-operator",
+         "ES-based logging is superseded by the Loki stack"),
+    ]
+
     def check_olm(self):
         plans = self.b.lines("05-installplan.txt")
-        pending = [" ".join((l.split() + ["", ""])[:3])
-                   for l in plans if l.split() and l.split()[-1] == "false"]
+        # long-lived clusters accumulate InstallPlan CHAINS (one per version);
+        # count only the newest pending plan per operator, not each link
+        pending_by_op = {}
+        for l in plans:
+            tok = l.split()
+            if len(tok) >= 5 and tok[-1] == "false":
+                base = re.sub(r"\.v?\d[\w.\-]*$", "", tok[2])  # CSV w/o version
+                key = (tok[0], base)
+                if key not in pending_by_op or tok[2] > pending_by_op[key][2]:
+                    pending_by_op[key] = tok
+        pending = ["%s %s -> %s" % (t[0], t[1], t[2])
+                   for t in pending_by_op.values()]
         if pending:
             self.add("MEDIUM", "Lifecycle",
-                     "%d operator InstallPlan(s) pending manual approval" % len(pending),
-                     "05-installplan.txt: " + "; ".join(pending[:8]),
+                     "%d operator(s) with InstallPlans pending manual approval"
+                     % len(pending),
+                     "05-installplan.txt: " + "; ".join(sorted(pending)[:8]),
                      "Bug fixes / security patches for these operators are "
                      "waiting; the gap grows silently.",
                      "Review and approve in a maintenance window; add a "
-                     "recurring review for Manual-approval subscriptions.")
+                     "recurring review for Manual-approval subscriptions.",
+                     assumption="Superseded plans in the same upgrade chain "
+                                "are deduplicated; only the newest pending "
+                                "version per operator is counted.")
         cats = self.b.read("05-catalogsource.txt") or ""
-        if "redhat-marketplace" in cats:
-            self.add("LOW", "Lifecycle",
-                     "Deprecated Red Hat Marketplace catalog present",
-                     "05-catalogsource.txt: redhat-marketplace source exists.",
-                     "The Marketplace (IBM-operated) is sunset; operators "
-                     "sourced from it will stop receiving updates.",
-                     "Migrate any operators using this source to vendor "
-                     "catalogs; then remove the source.",
-                     assumption="Marketplace sunset status per build-time "
-                                "knowledge (%s)." % BUILD_KNOWLEDGE_DATE)
+        # which catalogs do installed operators actually USE?
+        sub_sources = {}
+        for l in self.b.lines("05-subscriptions.txt"):
+            tok = l.split()
+            if len(tok) >= 4:
+                sub_sources.setdefault(tok[3], []).append(tok[1])
+        for cat, label in (("redhat-marketplace",
+                            "Deprecated Red Hat Marketplace catalog"),
+                           ("community-operators",
+                            "Community operator catalog")):
+            if cat not in cats:
+                continue
+            users = sub_sources.get(cat, [])
+            if users:
+                self.add("MEDIUM" if cat == "redhat-marketplace" else "LOW",
+                         "Lifecycle",
+                         "%s IN USE by %d operator(s)" % (label, len(users)),
+                         "05-catalogsource.txt + 05-subscriptions.txt: %s."
+                         % ", ".join(users[:6]),
+                         "Marketplace is sunset / community operators carry "
+                         "no Red Hat support - the dependent operators lose "
+                         "updates or supportability.",
+                         "Migrate the listed operators to vendor catalogs, "
+                         "then remove the source.",
+                         assumption="Catalog status per build-time knowledge "
+                                    "(%s)." % BUILD_KNOWLEDGE_DATE)
+            else:
+                self.add("LOW" if cat == "redhat-marketplace" else "INFO",
+                         "Lifecycle",
+                         "%s present but unused" % label,
+                         "05-catalogsource.txt: %s exists; no Subscription "
+                         "references it." % cat,
+                         "Unused catalogs cost memory (catalog pods) and "
+                         "invite unsupported installs.",
+                         "Disable it (`oc patch operatorhub cluster` "
+                         "disableAllDefaultSources or per-source).",
+                         assumption="Catalog status per build-time knowledge "
+                                    "(%s). Usage judged from "
+                                    "05-subscriptions.txt; if that file is "
+                                    "empty due to a collection issue, verify "
+                                    "manually." % BUILD_KNOWLEDGE_DATE)
         csvs = self.b.read("05-csv.txt") or ""
         uniq = sorted(set(re.findall(r"^\S+\s+(\S+?\.v?\d[\w.\-]*)\s", csvs, re.M)))
         self.facts["operators"] = uniq
@@ -589,13 +908,53 @@ class Analyzer(object):
                      "Plan migration to the Loki-based logging stack.",
                      assumption="Logging 5.x EOL status per build-time "
                                 "knowledge (%s)." % BUILD_KNOWLEDGE_DATE)
-        if "community" in (self.b.read("05-catalogsource.txt") or ""):
-            self.add("INFO", "Lifecycle",
-                     "Community operator catalog enabled",
-                     "05-catalogsource.txt: community-operators present.",
-                     "Community operators carry no Red Hat support.",
-                     "Inventory which installed operators come from it; "
-                     "accept-risk or replace.")
+        # unfinished migrations: superseded + successor stack both installed
+        for old_re, new_re, why in self.SUPERSEDED_PAIRS:
+            old_m = re.search(old_re, csvs)
+            if old_m and re.search(new_re, csvs):
+                self.add("LOW", "Lifecycle",
+                         "Superseded and successor operator both installed "
+                         "(%s)" % old_m.group(0),
+                         "05-csv.txt: %s alongside its successor." % old_m.group(0),
+                         "%s; running both suggests an unfinished migration - "
+                         "double resource cost and a stale attack/upgrade "
+                         "surface." % why,
+                         "Finish the migration and uninstall the superseded "
+                         "operator (check for leftover PVs/CRDs too).",
+                         assumption="Superseded pairs per build-time "
+                                    "knowledge (%s)." % BUILD_KNOWLEDGE_DATE)
+        # floating channels auto-approve unpredictable jumps
+        floating = ["%s/%s" % (l.split()[0], l.split()[1])
+                    for l in self.b.lines("05-subscriptions.txt")
+                    if len(l.split()) >= 5 and l.split()[2] in
+                    ("latest", "alpha", "beta") and l.split()[4] == "Automatic"]
+        if floating:
+            self.add("LOW", "Lifecycle",
+                     "%d subscription(s) on a floating channel with "
+                     "Automatic approval" % len(floating),
+                     "05-subscriptions.txt: " + ", ".join(floating[:6]),
+                     "`latest`/alpha/beta channels can jump operator major "
+                     "versions without review.",
+                     "Pin to a versioned stable channel or switch to Manual "
+                     "approval.")
+        # OperatorGroups without any CSV = uninstall remnants
+        og_ns = {l.split()[0] for l in self.b.lines("05-operatorgroup.txt")
+                 if l.split()}
+        csv_ns = {l.split()[0] for l in self.b.lines("05-csv.txt") if l.split()}
+        remnants = sorted(ns for ns in og_ns - csv_ns
+                          if not PLATFORM_NS_RE.match(ns))
+        if remnants:
+            self.add("LOW", "Hygiene",
+                     "%d namespace(s) with an OperatorGroup but no operator"
+                     % len(remnants),
+                     "05-operatorgroup.txt vs 05-csv.txt: " +
+                     ", ".join(remnants[:8]) +
+                     ("..." if len(remnants) > 8 else ""),
+                     "Leftovers from uninstalled operators; a stray "
+                     "OperatorGroup also breaks future installs into that "
+                     "namespace.",
+                     "Delete the OperatorGroups (and namespaces) or finish "
+                     "the uninstall.")
 
     def check_tenancy(self):
         n_proj = len(self.b.lines("06-projects.txt"))
@@ -606,18 +965,50 @@ class Analyzer(object):
         np_ns = {l.split()[0] for l in self.b.lines("03-networkpolicy.txt") if l.split()}
         lr_ns = {l.split()[0] for l in self.b.lines("06-limitrange.txt") if l.split()}
         self.facts["governance"] = (len(rq_ns), len(lr_ns), len(np_ns), n_proj)
-        if n_proj > 20 and len(rq_ns) < n_proj * 0.5:
+        # coverage is judged over TENANT namespaces only - platform namespaces
+        # (openshift-*, kube-*, default) legitimately carry no tenant quotas
+        tenants = self.profile.tenant_namespaces
+        self.facts["tenant_namespaces"] = len(tenants)
+        if not tenants:
+            self.add("LOW", "Tenancy",
+                     "No tenant namespaces yet - governance baseline missing "
+                     "for onboarding",
+                     "06-projects.txt: all %d namespaces are platform "
+                     "namespaces; no ResourceQuota/NetworkPolicy baseline "
+                     "exists for future tenants." % n_proj,
+                     "Not a live exposure today, but the first onboarded "
+                     "workload will land without quota or network isolation.",
+                     "Prepare a templated quota+LimitRange+default-deny "
+                     "baseline (e.g. via GitOps) before onboarding tenants.")
+            return
+        rq_cov = len(rq_ns & set(tenants))
+        np_cov = len(np_ns & set(tenants))
+        lr_cov = len(lr_ns & set(tenants))
+        if len(tenants) > 5 and lr_cov == 0 and rq_cov:
+            self.add("LOW", "Tenancy",
+                     "ResourceQuotas exist but no LimitRange in any tenant "
+                     "namespace",
+                     "06-limitrange.txt vs 06-projects.txt.",
+                     "Without LimitRanges, pods without explicit "
+                     "requests/limits bypass sensible defaults and skew "
+                     "quota accounting.",
+                     "Pair every tenant quota with a LimitRange default.")
+        if len(tenants) > 5 and rq_cov < len(tenants) * 0.5:
             self.add("MEDIUM", "Tenancy",
-                     "ResourceQuotas cover only %d of %d namespaces" % (len(rq_ns), n_proj),
-                     "06-resourcequota.txt vs 06-projects.txt.",
+                     "ResourceQuotas cover only %d of %d tenant namespaces"
+                     % (rq_cov, len(tenants)),
+                     "06-resourcequota.txt vs 06-projects.txt (platform "
+                     "namespaces excluded from the ratio).",
                      "Unquotad tenants can exhaust node memory (incompressible) "
                      "and trigger cascading evictions.",
                      "Define a quota+LimitRange baseline for every tenant "
                      "namespace (templated, e.g. via GitOps).")
-        if n_proj > 20 and len(np_ns) < n_proj * 0.5:
+        if len(tenants) > 5 and np_cov < len(tenants) * 0.5:
             self.add("MEDIUM", "Security",
-                     "NetworkPolicies cover only %d of %d namespaces" % (len(np_ns), n_proj),
-                     "03-networkpolicy.txt vs 06-projects.txt.",
+                     "NetworkPolicies cover only %d of %d tenant namespaces"
+                     % (np_cov, len(tenants)),
+                     "03-networkpolicy.txt vs 06-projects.txt (platform "
+                     "namespaces excluded from the ratio).",
                      "Flat east-west network: any compromised pod reaches "
                      "every unprotected namespace.",
                      "Roll out default-deny + allow-DNS/ingress baseline "
@@ -636,12 +1027,15 @@ class Analyzer(object):
         pdbs = [l for l in self.b.lines("06-pdb.txt")
                 if l.split() and l.split()[-1] == "0"]
         if pdbs:
-            self.add("HIGH", "Workloads",
+            self.add("LOW" if self.profile.sno else "HIGH", "Workloads",
                      "%d PodDisruptionBudget(s) allow zero disruptions" % len(pdbs),
                      "06-pdb.txt (ALLOWED=0): " +
                      "; ".join(" ".join(l.split()[:2]) for l in pdbs[:6]),
                      "Node drains hang on these pods - blocking MachineConfig "
-                     "rollouts, patching and upgrades.",
+                     "rollouts, patching and upgrades."
+                     + (" (Downgraded on SNO: the single node reboots in "
+                        "place, drains are not the upgrade mechanism.)"
+                        if self.profile.sno else ""),
                      "Add replicas or relax the PDBs so at least one "
                      "disruption is allowed.")
         wh = self.b.read("07-webhooks.txt") or ""
@@ -674,22 +1068,64 @@ class Analyzer(object):
                              "onto purpose-built custom SCCs.",
                              assumption="Compared against OCP 4.11+ default "
                                         "(seLinuxContext MustRunAs).")
-        priv = [l.split()[0] for l in self.b.lines("07-scc.txt")
-                if len(l.split()) > 1 and l.split()[1] == "true"
-                and l.split()[0] not in
-                ("privileged", "hostmount-anyuid", "node-exporter",
-                 "hostnetwork", "hostaccess")]
-        if priv:
-            self.add("MEDIUM", "Security",
-                     "%d custom privileged SCC(s)" % len(priv),
-                     "07-scc.txt (PRIV=true): " + ", ".join(priv[:10]),
-                     "Each privileged SCC is root-equivalent for whatever can "
-                     "use it.",
-                     "Verify each is bound only to the intended service "
-                     "accounts and still needed.",
-                     assumption="node-exporter listed as expected-privileged "
-                                "(monitoring default); verify no one modified "
-                                "it.")
+        # custom SCC risk scoring - PRIV=true is NOT the only root-equivalent
+        # signal (dangerous capabilities, RunAsAny, hostPath, volumes: * are
+        # just as bad and slip past a PRIV-column-only filter)
+        csvs_txt = self.b.read("05-csv.txt") or ""
+        risky, attributed = [], []
+        for line in self.b.lines("07-scc.txt"):
+            tok = line.replace("<no value>", "<no-value>").split()
+            if len(tok) < 10 or tok[0] in STOCK_SCCS:
+                continue
+            name, priv, caps, selinux, runasuser = tok[0], tok[1], tok[2], tok[3], tok[4]
+            volumes = tok[9]
+            score, why = 0, []
+            if priv == "true":
+                score += 3
+                why.append("PRIV")
+            if DANGEROUS_CAPS_RE.search(caps):
+                score += 2
+                why.append("caps=%s" % caps)
+            if runasuser == "RunAsAny":
+                score += 1
+                why.append("RunAsAny uid")
+            if selinux == "RunAsAny":
+                score += 1
+                why.append("RunAsAny selinux")
+            if '"*"' in volumes or "hostPath" in volumes:
+                score += 2
+                why.append("volumes incl. %s"
+                           % ("*" if '"*"' in volumes else "hostPath"))
+            if score < 2:
+                continue
+            owner = next((hint for pat, hint in OPERATOR_SCC_HINTS
+                          if re.match(pat, name) and re.search(hint, csvs_txt)),
+                         None)
+            entry = "%s (%s)" % (name, ", ".join(why))
+            (attributed if owner else risky).append(entry)
+        if risky:
+            self.add("HIGH" if any("PRIV" in r or "caps=" in r for r in risky)
+                     else "MEDIUM", "Security",
+                     "%d high-risk custom SCC(s) not attributable to an "
+                     "installed operator" % len(risky),
+                     "07-scc.txt: " + "; ".join(risky[:8]),
+                     "Each grants near-root capability to whatever service "
+                     "account can use it - regardless of the PRIV column.",
+                     "Identify the owner of each SCC, verify its bindings, "
+                     "and remove or narrow unneeded grants.",
+                     assumption="Risk scored from the scc table columns "
+                                "(capabilities, RunAsAny, hostPath/volumes); "
+                                "SCCs matching a known operator pattern with "
+                                "that operator installed are listed "
+                                "separately.")
+        if attributed:
+            self.add("LOW", "Security",
+                     "%d operator-owned elevated SCC(s) present" % len(attributed),
+                     "07-scc.txt: " + "; ".join(attributed[:8]),
+                     "Expected for the installed operators, but each is still "
+                     "an elevated-privilege surface.",
+                     "Confirm the SCCs are unmodified and bound only to the "
+                     "operators' service accounts.")
         # cluster-admin bindings
         crb = self.b.read("07-clusterrolebindings.txt") or ""
         admins, mg = [], []
@@ -702,8 +1138,8 @@ class Analyzer(object):
                     mg.append(name)
                 elif name not in DEFAULT_CLUSTER_ADMIN_CRBS:
                     admins.append(name)
-        if len(admins) > 5:
-            self.add("HIGH", "Security",
+        if admins:
+            self.add("HIGH" if len(admins) > 5 else "MEDIUM", "Security",
                      "%d non-default cluster-admin ClusterRoleBindings" % len(admins),
                      "07-clusterrolebindings.txt: " + ", ".join(admins[:10]) +
                      ("..." if len(admins) > 10 else ""),
@@ -712,9 +1148,11 @@ class Analyzer(object):
                      "compromise path.",
                      "Replace SA grants with scoped roles; move humans to "
                      "group-based, just-in-time elevation.",
-                     assumption="Bindings named system:* and the shipped "
-                                "cluster-admin(s) bindings are treated as "
-                                "defaults.")
+                     assumption="Bindings named system:* and the OCP-shipped "
+                                "cluster-admin bindings (%s) are treated as "
+                                "defaults per build-time knowledge (%s)."
+                                % (", ".join(sorted(DEFAULT_CLUSTER_ADMIN_CRBS)),
+                                   BUILD_KNOWLEDGE_DATE))
         if mg:
             self.add("MEDIUM", "Security",
                      "%d stale must-gather cluster-admin binding(s)" % len(mg),
@@ -729,10 +1167,13 @@ class Analyzer(object):
                      "remains active.",
                      "Remove it once IdP-based admin access is confirmed "
                      "working.")
-        # etcd encryption
+        # etcd encryption - "(empty result)" is the collector's empty marker,
+        # so test the file STATUS, not string truthiness
         enc = (self.b.read("07-etcd-encryption.txt") or "").strip()
-        self.facts["etcd_encryption"] = enc or "NOT ENABLED"
-        if not enc:
+        enc_missing = self.b.status("07-etcd-encryption.txt") in (
+            S_EMPTY, S_MISSING) or not enc
+        self.facts["etcd_encryption"] = "NOT ENABLED" if enc_missing else enc
+        if enc_missing and self.b.status("07-etcd-encryption.txt") != S_MISSING:
             self.add("HIGH", "Security",
                      "etcd encryption at rest is not enabled",
                      "07-etcd-encryption.txt is empty (apiserver "
@@ -740,25 +1181,41 @@ class Analyzer(object):
                      "Secrets/config in etcd are stored in plaintext on the "
                      "control-plane disks and inside etcd backups.",
                      "Enable aesgcm (or aescbc) etcd encryption.")
-        # oauth
+        # oauth - judge the ACTIVE spec block only; the last-applied
+        # annotation preserves historical config and must not raise findings
         oauth = self.b.read("07-oauth.yaml") or ""
-        if "type: HTPasswd" in oauth:
+        spec = yaml_block(oauth, "spec") or oauth
+        if "type: HTPasswd" in spec:
             self.add("MEDIUM", "Security",
                      "HTPasswd identity provider active",
-                     "07-oauth.yaml: identityProviders contains type: HTPasswd.",
+                     "07-oauth.yaml: spec.identityProviders contains "
+                     "type: HTPasswd.",
                      "Local password file: no MFA, no central "
                      "joiner/mover/leaver process.",
                      "Restrict to a documented break-glass account or remove; "
                      "authenticate through the enterprise IdP.")
-        if re.search(r"insecure:\s*true", oauth) or "ldap://" in oauth:
+        insecure_active = bool(re.search(r"insecure:\s*true", spec)
+                               or "ldap://" in spec)
+        insecure_hist = bool(re.search(r"insecure.{0,4}true", oauth)
+                             or "ldap://" in oauth)
+        if insecure_active:
             self.add("HIGH", "Security",
                      "LDAP identity provider configured without TLS",
-                     "07-oauth.yaml: 'insecure: true' and/or ldap:// URL "
-                     "(check also the last-applied annotation - it may be "
-                     "historical).",
+                     "07-oauth.yaml: spec contains 'insecure: true' and/or an "
+                     "ldap:// URL.",
                      "Bind credentials and user passwords cross the network "
                      "in cleartext.",
                      "Use ldaps:// with CA validation.")
+        elif insecure_hist:
+            self.add("LOW", "Security",
+                     "Historical insecure-LDAP config in OAuth annotations "
+                     "(not active)",
+                     "07-oauth.yaml: insecure/ldap:// appears only outside "
+                     "the active spec (last-applied annotation).",
+                     "The active configuration is clean; the annotation "
+                     "records that cleartext LDAP was used in the past.",
+                     "Confirm the old bind credentials were rotated after "
+                     "the migration.")
 
     def check_network(self):
         t = self.b.read("03-network-config.yaml") or ""
@@ -788,11 +1245,16 @@ class Analyzer(object):
         ic = self.b.read("03-ingresscontroller.yaml") or ""
         m = re.search(r"^\s*replicas:\s*(\d+)", ic, re.M)
         if m and int(m.group(1)) < 2:
-            self.add("HIGH", "Network",
-                     "Default ingress controller has <2 replicas",
-                     "03-ingresscontroller.yaml: replicas: %s." % m.group(1),
-                     "Single point of failure for all routes.",
-                     "Scale to >=2 replicas across failure domains.")
+            if self.profile.sno:
+                self.suppress("Default ingress controller has <2 replicas",
+                              "inherent to single-node topology "
+                              "(controlPlaneTopology: SingleReplica)")
+            else:
+                self.add("HIGH", "Network",
+                         "Default ingress controller has <2 replicas",
+                         "03-ingresscontroller.yaml: replicas: %s." % m.group(1),
+                         "Single point of failure for all routes.",
+                         "Scale to >=2 replicas across failure domains.")
         # insecure routes (fixed-width TERMINATION column)
         routes = self.b.read("03-routes.txt")
         if routes:
@@ -813,14 +1275,40 @@ class Analyzer(object):
                              "deliberately internal-only.")
 
     def check_monitoring(self):
+        mon_status = self.b.status("08-cluster-monitoring.yaml")
         mon = self.b.read("08-cluster-monitoring.yaml") or ""
-        fwd = "additionalAlertmanagerConfigs" in mon
+        fwd = mon_status == S_OK and "additionalAlertmanagerConfigs" in mon
         self.facts["alert_forwarding"] = fwd
+        if mon_status == S_OK:
+            fwd_evidence = ("08-cluster-monitoring.yaml: "
+                            "additionalAlertmanagerConfigs "
+                            + ("present (alerts forwarded to an external/hub "
+                               "Alertmanager)." if fwd else "absent."))
+        else:
+            # cluster-monitoring-config ConfigMap does not exist: that is a
+            # CONFIG FACT (stock defaults in effect), not a collection gap
+            fwd_evidence = ("cluster-monitoring-config ConfigMap not present "
+                            "(08-cluster-monitoring.yaml: %s) - monitoring "
+                            "runs on stock defaults, no alert forwarding "
+                            "configured." % mon_status)
+            mon_pvcs = [l for l in self.b.lines("04-pvc.txt")
+                        if l.split() and l.split()[0] == "openshift-monitoring"]
+            if not mon_pvcs and self.b.status("04-pvc.txt") in (S_OK, S_EMPTY):
+                self.add("MEDIUM", "Observability",
+                         "Monitoring stack runs on ephemeral storage "
+                         "(defaults in effect)",
+                         "cluster-monitoring-config not found + 04-pvc.txt: "
+                         "no PVCs in openshift-monitoring.",
+                         "Prometheus/Alertmanager state lives on emptyDir: "
+                         "every pod restart or node reboot erases all metric "
+                         "history and silences - post-incident analysis "
+                         "becomes impossible.",
+                         "Create cluster-monitoring-config with "
+                         "volumeClaimTemplates (and a retention policy) on a "
+                         "suitable StorageClass.")
         self.add("HIGH" if not fwd else "MEDIUM", "Observability",
                  "Verify alert notifications reach a human",
-                 "08-cluster-monitoring.yaml: additionalAlertmanagerConfigs "
-                 + ("present (alerts forwarded to an external/hub "
-                    "Alertmanager)." if fwd else "absent."),
+                 fwd_evidence,
                  "Alertmanager receiver config lives in a Secret this bundle "
                  "does not (and should not) collect - silent-alerting is the "
                  "most common root cause of long outages.",
@@ -892,8 +1380,22 @@ class Analyzer(object):
 
     def check_identity_facts(self):
         oauth = self.b.read("07-oauth.yaml") or ""
-        self.facts["idps"] = re.findall(r"^\s*type:\s*(\w+)\s*$", oauth, re.M)
+        spec = yaml_block(oauth, "spec") or oauth
+        self.facts["idps"] = re.findall(r"^\s*type:\s*(\w+)\s*$", spec, re.M)
         self.facts["users"] = len(self.b.lines("07-users.txt"))
+        if self.b.status("07-oauth.yaml") == S_OK and not self.facts["idps"] \
+                and self.facts["users"] == 0:
+            self.add("HIGH", "Security",
+                     "No identity provider configured - kubeadmin/kubeconfig "
+                     "are the only access paths",
+                     "07-oauth.yaml: spec has no identityProviders; "
+                     "07-users.txt: 0 users (no login has ever succeeded).",
+                     "All access rides on the bootstrap password or "
+                     "certificate kubeconfigs: unauditable, shared, and "
+                     "unrevokable per-person.",
+                     "Configure an identity provider (OIDC/LDAP) and "
+                     "group-based RBAC; keep kubeadmin only as documented "
+                     "break-glass.")
 
     def check_infra_facts(self):
         infra = self.b.read("01-infrastructure.yaml") or ""
@@ -904,6 +1406,39 @@ class Analyzer(object):
         reg = self.b.read("07-imageregistry.yaml") or ""
         self.facts["registry_state"] = yaml_grab(reg, "managementState")
         self.facts["argo_apps"] = len(self.b.lines("09-applications.txt"))
+        if self.facts["registry_state"] == "Removed":
+            self.add("MEDIUM", "Process",
+                     "Internal image registry is Removed - confirm this is "
+                     "intentional",
+                     "07-imageregistry.yaml: spec.managementState: Removed.",
+                     "No in-cluster builds or ImageStream pushes are "
+                     "possible; every image must come from an external "
+                     "registry"
+                     + (" - on this disconnected cluster that makes the "
+                        "mirror registry a single dependency for all image "
+                        "serving and DR." if self.profile.disconnected
+                        else "."),
+                     "Confirm with the owner that Removed is deliberate "
+                     "(it is a supported minimal-footprint choice); document "
+                     "the external registry dependency.")
+        # apiserver posture - supported-but-consequential defaults
+        apisrv = self.b.read("01-apiserver.yaml") or ""
+        audit = yaml_grab(apisrv, "profile")
+        if audit == "None":
+            self.add("MEDIUM", "Security",
+                     "API audit logging is disabled (profile: None)",
+                     "01-apiserver.yaml: spec.audit.profile: None.",
+                     "No API audit trail: forensics and compliance evidence "
+                     "are impossible after an incident.",
+                     "Set the audit profile to Default (or stricter).")
+        if re.search(r"tlsSecurityProfile:\s*\n\s*old:", apisrv):
+            self.add("MEDIUM", "Security",
+                     "API server TLS security profile set to Old",
+                     "01-apiserver.yaml: tlsSecurityProfile: old.",
+                     "Permits legacy TLS versions/ciphers for every API "
+                     "client.",
+                     "Move to Intermediate unless a legacy client is "
+                     "documented.")
 
     def check_node_pressure(self):
         flagged = []
@@ -1044,6 +1579,408 @@ class Analyzer(object):
                      "baseline.",
                      "Review each NonCompliant policy and remediate the drift.")
 
+    def check_data_availability(self):
+        """Classify every .err file: verified-absent vs defaults vs FAILED.
+
+        A failed collection is a declared blind spot - the report must never
+        read 'no data' as 'no problem'.
+        """
+        if not self.b.path.is_dir():
+            return
+        absent, notfound, failed = [], [], []
+        for err in sorted(self.b.path.glob("*.err")):
+            base = err.name[:-4]
+            {S_ERR_ABSENT: absent, S_ERR_NOTFOUND: notfound,
+             S_ERR_FAILED: failed}.get(self.b.status(base), failed).append(base)
+        self.facts["data_availability"] = {
+            "verified_absent": absent, "not_configured": notfound,
+            "failed": failed,
+        }
+        if not failed:
+            return
+        alerts_failed = any(f.startswith("08-active-alerts") for f in failed)
+        first_line = (self.b.err_text(failed[0]) or "").splitlines()
+        self.add("MEDIUM" if alerts_failed else "LOW", "Analyzer",
+                 "%d collection(s) FAILED - that data is unknown, not clean"
+                 % len(failed),
+                 "Failed .err files: " + ", ".join(failed[:8]) +
+                 ("..." if len(failed) > 8 else "") +
+                 ("; first error: %r" % first_line[0] if first_line else ""),
+                 ("The active-alerts snapshot is among the failures: the "
+                  "cluster's current alert state is UNKNOWN - do not report "
+                  "'no alerts firing'. " if alerts_failed else "")
+                 + "Every failed collection is a blind spot in this review.",
+                 "Re-run the failed commands live (or fix the collector) and "
+                 "review that data manually.")
+
+    def check_upgrade_posture(self):
+        """ClusterVersion conditions + patch staleness + update backlog."""
+        cv = self.b.read("01-clusterversion.yaml") or ""
+        cv_types = {"Upgradeable", "Failing", "Available", "Progressing",
+                    "RetrievedUpdates", "ReleaseAccepted"}
+        conds = {c["type"]: c for c in parse_conditions(cv, all_blocks=True)
+                 if c.get("type") in cv_types}
+        c = conds.get("Failing")
+        if c and c.get("status") == "True":
+            self.add("HIGH", "Lifecycle",
+                     "ClusterVersion is Failing",
+                     "01-clusterversion.yaml: Failing=True (%s): %s"
+                     % (c.get("reason", "?"), (c.get("message") or "")[:200]),
+                     "The CVO cannot reconcile the desired release - upgrades "
+                     "and even steady-state payload repair are broken.",
+                     "Resolve the named component first; do not attempt "
+                     "further upgrades while Failing.")
+        c = conds.get("Upgradeable")
+        if c and c.get("status") == "False":
+            self.add("MEDIUM", "Lifecycle",
+                     "Upgradeable=False - next MINOR upgrade is blocked (%s)"
+                     % c.get("reason", "?"),
+                     "01-clusterversion.yaml: %s" % (c.get("message") or "")[:250],
+                     "The next minor version will refuse to start until this "
+                     "is resolved; z-stream (patch) updates are NOT blocked.",
+                     "Address the reason (e.g. provide the admin-ack after "
+                     "checking removed-API usage) before the upgrade window.")
+        # patch staleness + cadence from history completionTimes
+        now = self._collection_time()
+        times = sorted(t for t in
+                       (parse_iso_time(x) for x in re.findall(
+                           r"completionTime:\s*(\S+)", yaml_block(cv, "history")))
+                       if t)
+        if now and times:
+            stale_days = (now - times[-1]).days
+            if stale_days >= 90:
+                self.add("HIGH" if stale_days >= 180 else "MEDIUM",
+                         "Lifecycle",
+                         "No update applied for ~%d months" % (stale_days // 30),
+                         "01-clusterversion.yaml history: last completed "
+                         "update %s." % times[-1].strftime("%Y-%m-%d"),
+                         "Accumulating z-streams usually include security "
+                         "errata; the gap grows silently and complicates the "
+                         "eventual jump.",
+                         "Schedule regular z-stream patching (e.g. "
+                         "quarterly); review the pending-updates list.",
+                         assumption="Staleness measured from the bundle "
+                                    "collection time, thresholds 90/180 days.")
+            gaps = [(b - a).days for a, b in zip(times, times[1:])]
+            if any(g > 365 for g in gaps):
+                self.add("MEDIUM", "Lifecycle",
+                         "Update history shows gap(s) longer than a year",
+                         "01-clusterversion.yaml history: largest gap %d "
+                         "days across %d recorded updates."
+                         % (max(gaps), len(times)),
+                         "Long gaps force multi-minor catch-up jumps later - "
+                         "the riskiest upgrade pattern.",
+                         "Adopt a fixed patching cadence.")
+        # pending updates backlog (01-upgrade.txt table) + security errata
+        upg = self.b.read("01-upgrade.txt") or ""
+        m = re.search(r"Recommended updates:\s*\n(.*)", upg, re.S)
+        n_updates = len(re.findall(r"^\s+(\d+\.\d+\.\d+)\s", m.group(1), re.M)) \
+            if m else 0
+        rhsa = len(set(re.findall(r"(RHSA-\d{4}:\d+)", cv)))
+        if n_updates >= 5:
+            self.add("MEDIUM", "Lifecycle",
+                     "%d recommended z-stream update(s) pending%s"
+                     % (n_updates,
+                        ", incl. %d security erratum/errata (RHSA)" % rhsa
+                        if rhsa else ""),
+                     "01-upgrade.txt: Recommended updates table"
+                     + ("; 01-clusterversion.yaml availableUpdates reference "
+                        "RHSA advisories." if rhsa else "."),
+                     "The cluster is missing published fixes"
+                     + (" including security updates" if rhsa else "") + ".",
+                     "Plan a z-stream update to the latest recommended "
+                     "version%s." % (" (z-streams are not blocked by "
+                                     "Upgradeable=False)"
+                                     if conds.get("Upgradeable", {}).get(
+                                         "status") == "False" else ""))
+
+    def check_events(self):
+        """Mine 11-events-warning.txt: recurring reasons ARE findings."""
+        rows = self.b.lines("11-events-warning.txt")
+        if not rows:
+            return
+        by_key, oom, sched, mount, etcd_ms, reg5xx, probes = \
+            {}, [], [], [], [], [], {}
+        for line in rows:
+            tok = line.split(None, 5)
+            if len(tok) < 6:
+                continue
+            ns, _seen, _type, reason, obj, msg = tok
+            by_key[(ns, reason)] = by_key.get((ns, reason), 0) + 1
+            if "OOM" in reason or "OOMKilled" in msg:
+                oom.append("%s/%s" % (ns, obj))
+            elif reason == "FailedScheduling":
+                sched.append("%s/%s" % (ns, obj))
+            elif reason in ("FailedMount", "FailedAttachVolume"):
+                mount.append("%s/%s" % (ns, obj))
+            elif "leader changed" in msg or "LeaderChange" in reason \
+                    or "took too long" in msg:
+                etcd_ms.extend(float(x) for x in
+                               re.findall(r"(\d+(?:\.\d+)?)\s*ms", msg))
+                etcd_ms.append(0.0)   # count the event even without a number
+            elif re.search(r"\b50[0-9]\b", msg) and \
+                    ("pull" in msg.lower() or "registry" in msg.lower()):
+                reg5xx.append("%s/%s" % (ns, obj))
+            elif reason == "Unhealthy":
+                probes[ns] = probes.get(ns, 0) + 1
+        if oom:
+            self.add("HIGH", "Capacity",
+                     "OOM kill event(s) in the warning-event window",
+                     "11-events-warning.txt: %d event(s), e.g. %s."
+                     % (len(oom), ", ".join(sorted(set(oom))[:5])),
+                     "Workloads are being killed for memory; limits are too "
+                     "tight or nodes are overcommitted.",
+                     "Right-size the affected workloads' memory "
+                     "requests/limits; check node memory headroom.")
+        if len(sched) >= 3:
+            self.add("MEDIUM", "Capacity",
+                     "Recurring FailedScheduling events (%d)" % len(sched),
+                     "11-events-warning.txt: e.g. %s."
+                     % ", ".join(sorted(set(sched))[:5]),
+                     "Pods cannot be placed - capacity, taints, affinity or "
+                     "PVC binding is blocking scheduling.",
+                     "Read one event's full message for the exact predicate "
+                     "that failed.")
+        if len(mount) >= 3:
+            self.add("MEDIUM", "Storage",
+                     "Recurring volume mount/attach failures (%d)" % len(mount),
+                     "11-events-warning.txt: e.g. %s."
+                     % ", ".join(sorted(set(mount))[:5]),
+                     "Workloads cannot access their storage; often a CSI "
+                     "driver or backend issue.",
+                     "Check the CSI driver pods and the storage backend for "
+                     "the listed volumes.")
+        if etcd_ms:
+            peaks = [x for x in etcd_ms if x > 0]
+            self.add("HIGH", "Stability",
+                     "etcd leader-change / slow-request warning events",
+                     "11-events-warning.txt: %d event(s)%s."
+                     % (len(etcd_ms),
+                        "; disk metrics up to %.0f ms (fsync guidance ~10 ms)"
+                        % max(peaks) if peaks else ""),
+                     "Leader elections stall every write; recurring ones "
+                     "signal disk latency or CPU starvation on control-plane "
+                     "nodes - an outage precursor.",
+                     "Check control-plane disk performance (etcd fsync "
+                     "metrics live only in Prometheus - collect them live).")
+        if reg5xx:
+            self.add("INFO", "Workloads",
+                     "Registry 5xx pull errors in the event window (likely "
+                     "upstream/transient)",
+                     "11-events-warning.txt: %d event(s), e.g. %s."
+                     % (len(reg5xx), ", ".join(sorted(set(reg5xx))[:4])),
+                     "Image pulls failed with server errors - usually a "
+                     "registry-side incident, not a cluster fault.",
+                     "Correlate timestamps across clusters; verify the pulls "
+                     "have since succeeded.")
+        flappy = {ns: n for ns, n in probes.items() if n >= 5}
+        if flappy:
+            self.add("LOW", "Workloads",
+                     "Recurring probe failures in %d namespace(s)" % len(flappy),
+                     "11-events-warning.txt (reason=Unhealthy): "
+                     + ", ".join("%s (%d)" % kv for kv in
+                                 sorted(flappy.items(), key=lambda kv: -kv[1])[:5]),
+                     "Flapping probes cause restarts and mask real failures; "
+                     "often undersized probes timeouts or resource pressure.",
+                     "Inspect the probe messages; tune timeouts or fix the "
+                     "slow startup.")
+        covered = ("FailedScheduling", "FailedMount", "FailedAttachVolume",
+                   "Unhealthy")
+        other = {k: n for k, n in by_key.items()
+                 if n >= 10 and k[1] not in covered and "OOM" not in k[1]}
+        if other:
+            top = sorted(other.items(), key=lambda kv: -kv[1])[:5]
+            self.add("MEDIUM", "Stability",
+                     "Other recurring warning-event pattern(s): %s"
+                     % ", ".join(sorted({k[1] for k, _ in top})),
+                     "11-events-warning.txt: "
+                     + "; ".join("%s/%s x%d" % (k[0], k[1], n) for k, n in top),
+                     "Each recurring warning reason is usually a finding in "
+                     "disguise.",
+                     "Read the full messages for each recurring "
+                     "namespace+reason pair.")
+
+    def check_csr(self):
+        pend = [l.split()[0] for l in self.b.lines("02-csr.txt")
+                if "Pending" in l]
+        if pend:
+            self.add("HIGH", "Stability",
+                     "%d certificate signing request(s) Pending" % len(pend),
+                     "02-csr.txt: " + ", ".join(pend[:6]) +
+                     ("..." if len(pend) > 6 else ""),
+                     "Unapproved CSRs block node joins and kubelet cert "
+                     "renewal - nodes can drop NotReady when their cert "
+                     "expires.",
+                     "Review and approve legitimate CSRs "
+                     "(`oc adm certificate approve`); investigate why "
+                     "auto-approval did not handle them.")
+
+    def check_topology_spread(self):
+        """Failure-domain signals - HA clusters only."""
+        if self.profile.sno:
+            return
+        rows = self.b.lines("02-nodes-roles-zones.txt")
+        t = self.b.read("02-nodes-roles-zones.txt") or ""
+        header = t.splitlines()[0] if t else ""
+        if rows and "ZONE" in header:
+            zones = {col_slice(header, l, "ZONE", ()) for l in rows}
+            if zones == {""}:
+                self.add("LOW", "Stability",
+                         "No failure-domain (zone) labels on any node",
+                         "02-nodes-roles-zones.txt: ZONE column empty for "
+                         "all nodes.",
+                         "Zone-aware scheduling, PV topology and HA spread "
+                         "cannot work without topology labels.",
+                         "Label nodes with topology.kubernetes.io/zone per "
+                         "rack/site/failure domain.")
+        # hostname-prefix inference: all masters in one site-prefix while
+        # workers span several suggests a single-site control plane
+        masters, workers = set(), set()
+        for line in self.b.lines("02-nodes-wide.txt"):
+            tok = line.split()
+            if len(tok) >= 3:
+                prefix = re.sub(r"[-_]?\d+$", "", tok[0].split(".")[0].lower())
+                # strip the role token so site prefixes become comparable
+                # (site1-mst01 / site1-wrk03 -> site1)
+                prefix = re.sub(r"[-_]?(mst|master|wrk|worker|inf|infra|"
+                                r"cp|ctl|node)$", "", prefix)
+                (masters if "master" in tok[2] or "control-plane" in tok[2]
+                 else workers).add(prefix)
+        if len(workers) >= 2 and len(masters) == 1 and masters <= workers:
+            self.add("MEDIUM", "Stability",
+                     "All control-plane nodes share one hostname prefix "
+                     "while workers span several",
+                     "02-nodes-wide.txt: master prefix %s vs worker prefixes "
+                     "%s." % (", ".join(sorted(masters)),
+                              ", ".join(sorted(workers))),
+                     "If the prefixes encode sites/racks, the entire control "
+                     "plane may sit in ONE failure domain - a site loss "
+                     "takes down etcd quorum.",
+                     "Confirm the physical placement of the control-plane "
+                     "nodes; spread across failure domains if possible.",
+                     assumption="Failure domains inferred from hostname "
+                                "prefixes (trailing digits stripped) - "
+                                "verify against the real site layout.")
+
+    def check_prom_am(self):
+        for line in self.b.lines("08-prom-am.txt", skip_header=False):
+            tok = line.split()
+            if len(tok) < 6 or not re.match(r"(prometheus|alertmanager)\.",
+                                            tok[0]):
+                continue
+            name, desired, ready, avail = tok[0], tok[2], tok[3], tok[5]
+            if (desired.isdigit() and ready.isdigit()
+                    and int(ready) < int(desired)) or avail == "False":
+                self.add("HIGH", "Observability",
+                         "Monitoring component %s not fully available"
+                         % name.split(".")[0],
+                         "08-prom-am.txt: %s ready %s/%s, available=%s."
+                         % (name, ready, desired, avail),
+                         "Degraded Prometheus/Alertmanager means gaps in "
+                         "metrics and undelivered alerts RIGHT NOW.",
+                         "Check the pods and PVCs in openshift-monitoring; "
+                         "see also 06-pods-all.txt.")
+
+    def check_egress_targets(self):
+        urls = []
+        for f in ("08-uwm.yaml", "08-cluster-monitoring.yaml"):
+            t = self.b.read(f) or ""
+            if "remoteWrite" in t:
+                urls += ["%s (%s)" % (u, f) for u in
+                         re.findall(r"url:\s*(\S+)", t)]
+        if urls:
+            self.add("INFO", "Observability",
+                     "Metrics leave the cluster via remoteWrite",
+                     "; ".join(sorted(set(urls))[:5]),
+                     "Telemetry/metrics egress to external endpoints - a "
+                     "data-flow the owner should be able to name.",
+                     "Confirm each destination is intended (and reachable "
+                     "on air-gapped networks).")
+
+    def check_routes_hosts(self):
+        t = self.b.read("03-routes.txt")
+        apps = yaml_grab(self.b.read("01-ingress-config.yaml") or "", "domain")
+        base = yaml_grab(self.b.read("01-dns.yaml") or "", "baseDomain")
+        if not t or not apps:
+            return
+        lines_ = t.splitlines()
+        header = lines_[0]
+        if "HOST/PORT" not in header:
+            return
+        foreign = []
+        for line in lines_[1:]:
+            host = col_slice(header, line, "HOST/PORT", ("PATH", "SERVICES"))
+            if host and "." in host and not host.endswith(apps) \
+                    and not (base and host.endswith(base)):
+                foreign.append("%s (%s)" % (host, line.split()[0]))
+        if foreign:
+            self.add("LOW", "Security",
+                     "%d route(s) claim hostnames outside the cluster's "
+                     "domains" % len(foreign),
+                     "03-routes.txt vs ingress domain %s: %s."
+                     % (apps, "; ".join(sorted(set(foreign))[:5])),
+                     "A route claiming a foreign hostname only works with "
+                     "external DNS pointing here - or it is a leftover / "
+                     "spoofing risk (first-claim wins inside the router).",
+                     "Verify each is intentional; delete leftovers.")
+
+    def check_naming_hygiene(self):
+        test_re = re.compile(r"(^|[-_])(test\d*|tmp|temp|debug|demo|scratch|"
+                             r"todelete|delete-?me)([-_\d]|$)", re.I)
+        suspects = sorted(n for n in self.profile.tenant_namespaces
+                          if test_re.search(n))
+        if suspects:
+            self.add("LOW", "Hygiene",
+                     "%d namespace(s) look like test/temporary environments"
+                     % len(suspects),
+                     "06-projects.txt: " + ", ".join(suspects[:8]) +
+                     ("..." if len(suspects) > 8 else ""),
+                     "Ad-hoc namespaces accumulate without quotas, owners or "
+                     "cleanup - and often outlive their purpose by years.",
+                     "Confirm owners; delete or formalize each.",
+                     assumption="Matched by name keywords "
+                                "(test/tmp/temp/debug/demo/...).")
+        prod_re = re.compile(r"(^|[-_])pr[o]?d([-_]|$)|production", re.I)
+        test_in_prod = []
+        for line in self.b.lines("06-workloads-status.txt"):
+            tok = line.split()
+            if len(tok) >= 3 and prod_re.search(tok[1]) and \
+                    re.search(r"test", tok[2], re.I):
+                test_in_prod.append("%s/%s" % (tok[1], tok[2]))
+        if test_in_prod:
+            self.add("LOW", "Hygiene",
+                     "%d 'test'-named workload(s) inside production "
+                     "namespaces" % len(test_in_prod),
+                     "06-workloads-status.txt: "
+                     + ", ".join(sorted(set(test_in_prod))[:6]),
+                     "Test workloads in prod namespaces share prod quotas, "
+                     "secrets exposure and backup scope.",
+                     "Move them to non-prod namespaces or delete.")
+        cron = self.b.read("10-cronjobs.txt")
+        if cron:
+            header = cron.splitlines()[0]
+            odd = []
+            for line in cron.splitlines()[1:]:
+                if not line.strip():
+                    continue
+                sched = col_slice(header, line, "SCHEDULE", ("TIMEZONE",))
+                name = line.split()[1] if len(line.split()) > 1 else "?"
+                ns = line.split()[0]
+                if sched.strip() == "* * * * *":
+                    odd.append("%s/%s runs EVERY MINUTE" % (ns, name))
+                elif re.search(r"unseal|secret-sync|token-refresh", name):
+                    odd.append("%s/%s (secret-handling cron)" % (ns, name))
+            if odd:
+                self.add("LOW", "Hygiene",
+                         "%d CronJob(s) with unusual schedule or purpose"
+                         % len(odd),
+                         "10-cronjobs.txt: " + "; ".join(odd[:5]),
+                         "Every-minute jobs generate pod churn and often "
+                         "paper over a broken mechanism (e.g. auto-unseal "
+                         "loops imply unseal keys stored nearby).",
+                         "Review each: is the cadence justified, and where "
+                         "do its credentials live?")
+
     def _collection_time(self):
         m = re.search(r"_(\d{8})-(\d{6})$", self.b.path.name)
         if not m:
@@ -1058,7 +1995,7 @@ class Analyzer(object):
         now = self._collection_time()
         if not rows or now is None:
             return
-        soon = []
+        soon, rotated = [], []
         for line in rows:
             tok = line.split()
             if len(tok) < 3 or tok[2] in ("<none>", ""):
@@ -1068,8 +2005,40 @@ class Analyzer(object):
             except ValueError:
                 continue
             days = (exp - now).days
-            if days <= 90:
-                soon.append((days, "%s/%s (%dd)" % (tok[0], tok[1], days)))
+            if days > 90:
+                continue
+            # ISSUER column (v2 collector) or namespace tells rotation class:
+            # platform-signer leaf certs are short-lived BY DESIGN and
+            # auto-rotated - only manually managed certs deserve escalation
+            issuer = tok[3] if len(tok) > 3 else ""
+            auto = bool(AUTOROTATED_ISSUER_RE.search(issuer)
+                        or (not issuer and re.match(
+                            r"openshift-(kube-|etcd|config-managed|"
+                            r"service-ca|machine-config)", tok[0])))
+            (rotated if auto else soon).append(
+                (days, "%s/%s (%dd)" % (tok[0], tok[1], days)))
+        base_assumption = ("Days counted from the bundle collection time "
+                           "(%s), not today; expiry read from the "
+                           "auth.openshift.io/certificate-not-after "
+                           "annotation (no key material)."
+                           % now.strftime("%Y-%m-%d"))
+        if rotated:
+            rotated.sort()
+            self.add("LOW", "Security",
+                     "%d auto-rotated platform certificate(s) in their "
+                     "normal renewal window" % len(rotated),
+                     "07-cert-expiry.txt: " +
+                     ", ".join(s for _, s in rotated[:6]) +
+                     ("..." if len(rotated) > 6 else ""),
+                     "Platform-signer leaf certs are short-lived by design; "
+                     "the risk is only a STALLED rotation (unhealthy owning "
+                     "operator) or, on SNO, a node powered off across the "
+                     "rotation window waking with expired certs.",
+                     "Verify the kube-apiserver/kube-controller-manager "
+                     "operators are healthy so rotation advances; no manual "
+                     "renewal needed.",
+                     assumption=base_assumption + " Rotation class inferred "
+                                "from the ISSUER column / namespace.")
         if not soon:
             return
         soon.sort()
@@ -1090,20 +2059,21 @@ class Analyzer(object):
                      "TLS and can take the cluster offline.",
                      "Confirm automatic cert rotation is healthy; renew any "
                      "manually managed certificates before expiry.",
-                     assumption="Days counted from the bundle collection time "
-                                "(%s), not today; expiry read from the "
-                                "auth.openshift.io/certificate-not-after "
-                                "annotation (no key material)."
-                                % now.strftime("%Y-%m-%d"))
+                     assumption=base_assumption)
 
     ALL_CHECKS = [
         check_meta, check_access, check_version, check_clusterversion,
-        check_clusteroperators, check_nodes, check_node_pressure, check_mcp,
+        check_upgrade_posture, check_clusteroperators, check_nodes,
+        check_node_pressure, check_topology_spread, check_csr, check_mcp,
         check_pods, check_workload_status, check_etcd_backup, check_etcd_health,
-        check_storage, check_olm, check_tenancy, check_pdb_webhooks,
+        check_storage, check_olm, check_tenancy, check_naming_hygiene,
+        check_pdb_webhooks,
         check_security, check_acm_policies, check_cert_expiry, check_network,
-        check_nncp, check_whereabouts, check_ovnkube_coverage, check_monitoring,
+        check_routes_hosts, check_nncp, check_whereabouts,
+        check_ovnkube_coverage, check_monitoring, check_prom_am,
+        check_egress_targets, check_events,
         check_gpu, check_identity_facts, check_infra_facts,
+        check_data_availability,
     ]
 
     def run(self):
@@ -1150,12 +2120,19 @@ def render_overview(a, bundle_name):
              % (f.get("ocp_version", "?"), f.get("channel", "?")))
     L.append("| Kubernetes | %s |" % f.get("k8s_version", "?"))
     L.append("| Platform | %s |" % f.get("platform", "?"))
+    L.append("| Topology | control plane: %s, workers: %s |"
+             % (a.profile.cp_topology, a.profile.infra_topology))
+    L.append("| Connectivity | %s |"
+             % ("disconnected/mirrored" if a.profile.disconnected
+                else "connected (no mirror/proxy signals)"))
     L.append("| Release image mirror | %s |" % f.get("release_mirror", "-"))
     L.append("| Internal image registry | %s |" % f.get("registry_state", "?"))
     L.append("| etcd encryption | %s |" % f.get("etcd_encryption", "?"))
+    if f.get("install_date"):
+        L.append("| Installed | %s |" % f["install_date"])
     hist = f.get("version_history") or []
     if hist:
-        L.append("| Version history | %s |" % " → ".join(reversed(hist[:12])))
+        L.append("| Update history | %s |" % " → ".join(reversed(hist[:12])))
     L.append("")
     L.append("## Topology")
     L.append("")
@@ -1215,9 +2192,24 @@ def render_overview(a, bundle_name):
     gov = f.get("governance")
     if gov:
         rq, lr, np_, tot = gov
-        L.append("- Projects: %d | with ResourceQuota: %d | with LimitRange: "
-                 "%d | with NetworkPolicy: %d" % (tot, rq, lr, np_))
+        L.append("- Projects: %d (tenant namespaces: %s) | with "
+                 "ResourceQuota: %d | with LimitRange: %d | with "
+                 "NetworkPolicy: %d"
+                 % (tot, f.get("tenant_namespaces", "?"), rq, lr, np_))
     L.append("")
+    da = f.get("data_availability")
+    if da:
+        L.append("## Data availability")
+        L.append("")
+        L.append("- Features verified ABSENT (resource type not on the "
+                 "cluster): %d file(s)" % len(da["verified_absent"]))
+        if da["not_configured"]:
+            L.append("- Optional config objects not present (defaults in "
+                     "effect): %s" % ", ".join(da["not_configured"]))
+        if da["failed"]:
+            L.append("- **Collections FAILED (data unknown - blind spots):** "
+                     "%s" % ", ".join(da["failed"]))
+        L.append("")
     return "\n".join(L) + "\n"
 
 
@@ -1239,6 +2231,8 @@ def render_issues(a, bundle_name):
              "metrics, Ceph internal health, or anything inside Secrets. "
              "See manual-review-guide.md.")
     L.append("")
+    L.append("**Calibration:** %s." % a.profile.describe())
+    L.append("")
     cur = None
     idx = 0
     for f in a.findings:
@@ -1254,6 +2248,15 @@ def render_issues(a, bundle_name):
         L.append("- **Recommendation:** %s" % f["rec"])
         if f["assumption"]:
             L.append("- **Assumption:** %s" % f["assumption"])
+        L.append("")
+    if a.suppressed:
+        L.append("## Suppressed by topology calibration")
+        L.append("")
+        L.append("The following would be findings on a standard HA cluster "
+                 "but are inherent to this cluster's topology:")
+        L.append("")
+        for title, reason in a.suppressed:
+            L.append("- %s - *%s*" % (title, reason))
         L.append("")
     L.append("## Global assumptions & limitations")
     L.append("")
