@@ -31,6 +31,12 @@ All notable changes to this toolkit are recorded here. Dates are ISO (YYYY-MM-DD
 
 ### Changed
 
+- Reports no longer read as work orders: every generated file opens with a
+  notice that findings and severities can be wrong and that no step may be
+  taken before it is understood, verified and approved; the per-finding
+  field is now "Suggested direction (verify first)", severities are marked
+  "(estimated)", and suggestions carry no state-changing commands. The AI
+  skill follows the same rules and adds a "How to verify" line per finding.
 - Collector hardening: every `oc` call carries a request timeout
   (`OCP_REVIEW_TIMEOUT`, default 120s), and collision-prone resources are
   fully qualified (e.g. `clusterpolicies.nvidia.com`, which a bare

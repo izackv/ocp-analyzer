@@ -7,7 +7,8 @@ Analyzes the output of collect-ocp-review.sh (v2) or collect-ocp-overview.sh
 (v1) WITHOUT any cluster or internet access, and generates:
 
     architecture-overview.md   what the cluster is (topology, versions, stack)
-    issues.md                  findings with evidence / risk / recommendation
+    issues.md                  findings with evidence / risk / suggested
+                               direction (to verify - never an instruction)
     manual-review-guide.md     what a human should still check in each file
 
 Design constraints (deliberate):
@@ -31,6 +32,33 @@ from datetime import datetime
 from pathlib import Path
 
 SEV_ORDER = ["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"]
+
+# Heads every generated report and findings.json. The reports are read by
+# people who never open the README, so the warning travels with the output.
+# Keep the wording in sync with skills/ocp-bundle-review/SKILL.md.
+SUGGESTION_LABEL = "Suggested direction (verify first)"
+NOTICE = [
+    "**Read before acting.** This report was generated automatically from a "
+    "point-in-time data bundle, with no access to the live cluster, its "
+    "business context or current Red Hat documentation.",
+    "**Findings can be wrong or incomplete.** A finding is a lead to "
+    "investigate, not a confirmed defect, and the absence of a finding is "
+    "not proof of health.",
+    "**Severity levels are estimates.** CRITICAL / HIGH / MEDIUM / LOW / "
+    "INFO come from generic rules and may be too high or too low for this "
+    "cluster.",
+    "**Suggested directions are not instructions.** Take no step on a "
+    "cluster before you understand it, have verified it against the live "
+    "cluster and the current Red Hat documentation for the installed "
+    "version, have tested it outside production, and have approval through "
+    "your change process.",
+]
+
+
+def notice_lines():
+    """The notice as markdown blockquote lines (first line, then bullets)."""
+    return (["> " + NOTICE[0], ">"] + ["> - " + n for n in NOTICE[1:]] + [""])
+
 
 # Toolkit release (CalVer YYYY.MM[.patch]); released together with
 # collect-ocp-review.sh, which stamps the same values into 00-meta.txt.
@@ -1025,7 +1053,8 @@ class Analyzer(object):
                      "%d superseded installer/pruner pods linger" % one_shot,
                      "06-pods-all.txt: Error-state one-shot control-plane pods.",
                      "Cosmetic, but clutters pod listings and monitoring.",
-                     "Prune with `oc adm prune` or ignore; no action urgent.")
+                     "Prune them (see the pruning documentation) or ignore; no "
+                     "action urgent.")
         stale = status_count.get("ContainerStatusUnknown", 0) + \
             sum(v for k, v in status_count.items() if k.startswith("Init"))
         if stale > 10:
@@ -1033,7 +1062,7 @@ class Analyzer(object):
                      "Many stale/stuck pods need pruning or triage",
                      "06-pods-all.txt: ContainerStatusUnknown+Init-stuck = %d." % stale,
                      "Consumes etcd/API resources and clutters operations.",
-                     "Prune old pods (`oc adm prune`); investigate pods stuck "
+                     "Prune old pods; investigate pods stuck "
                      "in Init states (shared root cause is likely when many "
                      "sit in one namespace).")
 
@@ -1369,7 +1398,7 @@ class Analyzer(object):
                          "references it." % cat,
                          "Unused catalogs cost memory (catalog pods) and "
                          "invite unsupported installs.",
-                         "Disable it (`oc patch operatorhub cluster` "
+                         "Disable it (in the OperatorHub cluster config: "
                          "disableAllDefaultSources or per-source).",
                          assumption="Catalog status per build-time knowledge "
                                     "(%s). Usage judged from "
@@ -2804,7 +2833,8 @@ class Analyzer(object):
                      "renewal - nodes can drop NotReady when their cert "
                      "expires.",
                      "Review and approve legitimate CSRs "
-                     "(`oc adm certificate approve`); investigate why "
+                     "(certificate approval is an admin action - check "
+                     "who requested each one first); investigate why "
                      "auto-approval did not handle them.")
 
     def check_topology_spread(self):
@@ -3413,6 +3443,7 @@ def render_overview(a, bundle_name):
     L = []
     L.append("# Architecture Overview (auto-generated, offline)")
     L.append("")
+    L.extend(notice_lines())
     L.append("*Bundle:* `%s` (collector %s) - *generated:* %s by "
              "ocp_analyzer.py %s, knowledge %s (offline)*"
              % (bundle_name, f.get("collector_version", "?"),
@@ -3562,15 +3593,18 @@ def render_issues(a, bundle_name, prev_diff=None):
     L = []
     L.append("# Issues (auto-generated, offline)")
     L.append("")
-    L.append("*Bundle:* `%s` - analyzer %s (knowledge %s) - findings: %s"
+    L.extend(notice_lines())
+    L.append("*Bundle:* `%s` - analyzer %s (knowledge %s) - findings by "
+             "estimated severity: %s"
              % (bundle_name, TOOLKIT_VERSION, BUILD_KNOWLEDGE_DATE,
                 ", ".join("%s: %d" % (s, counts[s]) for s in SEV_ORDER if s in counts)))
     L.append("")
     L.append("> Every finding cites the bundle file it came from (the "
              "'Evidence file reference' appendix maps files to the `oc` "
-             "commands that produced them). Findings marked with an "
-             "**Assumption** are heuristic - verify them before presenting "
-             "to the customer. This offline analyzer CANNOT check: Red Hat "
+             "commands that produced them). Every finding needs "
+             "verification; those marked with an **Assumption** rest on an "
+             "extra heuristic on top of that. This offline analyzer CANNOT "
+             "check: Red Hat "
              "lifecycle/CVE status, etcd latency metrics, Ceph internal "
              "health, or anything inside Secrets. See "
              "manual-review-guide.md and attention-points.md.")
@@ -3585,7 +3619,8 @@ def render_issues(a, bundle_name, prev_diff=None):
         L.append("## Top priorities")
         L.append("")
         for rank, (n, f) in enumerate(top, 1):
-            L.append("%d. **#%d %s** (%s)" % (rank, n, f["title"], f["sev"]))
+            L.append("%d. **#%d %s** (estimated %s)"
+                     % (rank, n, f["title"], f["sev"]))
         L.append("")
     if prev_diff:
         L.append("## Changes since previous run")
@@ -3607,7 +3642,7 @@ def render_issues(a, bundle_name, prev_diff=None):
     for f in a.findings:
         if f["sev"] != cur:
             cur = f["sev"]
-            L.append("## %s" % cur)
+            L.append("## %s (estimated)" % cur)
             L.append("")
         idx += 1
         files_cited.update(re.findall(r"\b(\d{2}-[\w.-]+?\.(?:txt|yaml|json))",
@@ -3620,7 +3655,7 @@ def render_issues(a, bundle_name, prev_diff=None):
                      "after recovery.")
         L.append("- **Evidence:** %s" % f["evidence"])
         L.append("- **Risk:** %s" % f["risk"])
-        L.append("- **Recommendation:** %s" % f["rec"])
+        L.append("- **%s:** %s" % (SUGGESTION_LABEL, f["rec"]))
         if f["assumption"]:
             L.append("- **Assumption:** %s" % f["assumption"])
         L.append("")
@@ -3668,6 +3703,7 @@ def render_attention(a, bundle_name):
     L = []
     L.append("# Attention Points (reviewer-internal, auto-generated)")
     L.append("")
+    L.extend(notice_lines())
     L.append("*Bundle:* `%s` - analyzer %s. Internal notes: collection "
              "anomalies, unverifiable items, and questions to ask the "
              "customer. Not part of the customer-facing deliverable."
@@ -3855,6 +3891,7 @@ def render_guide(a, bundle_name):
     L = []
     L.append("# Manual Review Guide - what to look for in each file")
     L.append("")
+    L.extend(notice_lines())
     L.append("*Bundle:* `%s` (analyzer %s). "
              "The analyzer automates part of this; this guide "
              "covers what a human reviewer should STILL examine, including "
@@ -3955,6 +3992,11 @@ def main():
         (outdir / name).write_text(text)
     coll = a._collection_time()
     (outdir / "findings.json").write_text(json.dumps({
+        "notice": [re.sub(r"\*\*", "", n) for n in NOTICE],
+        "field_notes": {
+            "sev": "estimated severity - may be too high or too low",
+            "rec": SUGGESTION_LABEL + " - a lead, never an instruction",
+        },
         "analyzer": TOOLKIT_VERSION,
         "knowledge": BUILD_KNOWLEDGE_DATE,
         "bundle": bdir.name,
@@ -3974,7 +4016,8 @@ def main():
     print("analyzed bundle : %s (collector %s)"
           % (bdir, a.facts.get("collector_version", "?")))
     print("findings        : " + (", ".join(
-        "%s=%d" % (s, counts[s]) for s in SEV_ORDER if s in counts) or "none"))
+        "%s=%d" % (s, counts[s]) for s in SEV_ORDER if s in counts) or "none")
+          + "   (estimated severities)")
     if prev_diff:
         print("vs previous run : new=%d resolved=%d severity-changed=%d"
               % (len(prev_diff["new"]), len(prev_diff["resolved"]),
@@ -3982,6 +4025,8 @@ def main():
     print("reports written : %s" % outdir)
     for name in list(reports) + ["findings.json"]:
         print("   - %s" % name)
+    print("note            : findings and severities can be wrong; verify "
+          "every suggested step before acting on a cluster.")
 
 
 if __name__ == "__main__":

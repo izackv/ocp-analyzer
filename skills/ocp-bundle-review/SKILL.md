@@ -1,6 +1,6 @@
 ---
 name: ocp-bundle-review
-description: Review an OpenShift cluster from a collect-ocp-review.sh (or collect-ocp-overview.sh) output bundle. Produces an architecture review, a severity-ranked issues list with evidence/risk/mitigation, and an attention-points file. Use when the user asks to analyze/review an OCP cluster bundle, cross-check a TSR report, or assess OpenShift health from collected oc outputs.
+description: Review an OpenShift cluster from a collect-ocp-review.sh (or collect-ocp-overview.sh) output bundle. Produces an architecture review, a severity-ranked issues list with evidence/risk/suggested direction (to be verified, never an instruction), and an attention-points file. Use when the user asks to analyze/review an OCP cluster bundle, cross-check a TSR report, or assess OpenShift health from collected oc outputs.
 ---
 
 # OCP Bundle Review
@@ -161,17 +161,56 @@ Write three markdown files next to the bundle, named
 1. **Architecture review** — customer-facing: identity/lifecycle table,
    topology, network, storage, operators & platform services, identity &
    security, observability, backup/DR, tenancy; end with genuine strengths
-   and top recommendations. Facts only, each traceable to a file.
-2. **Issues list** — severity-ranked (CRITICAL/HIGH/MEDIUM/LOW). Per issue:
+   and the top suggested directions. Facts only, each traceable to a file.
+2. **Issues list** — ranked by **estimated** severity
+   (CRITICAL/HIGH/MEDIUM/LOW); write the section headers as
+   `CRITICAL (estimated)` etc. Per issue:
    **Source** ([Script]/[TSR]/[Both]), **Evidence** (file + the `oc` command
    that produced it + short excerpt; or TSR section §), **Risk** (concrete
-   consequence), **Mitigation** (actionable steps). Group findings sharing a
+   consequence), **Suggested direction (verify first)** (what to look into
+   and where it leads — a direction, not a procedure), **How to verify**
+   (the specific read-only check, document or question that would confirm
+   or disprove THIS finding before anyone acts on it). Group findings sharing a
    root cause. If a TSR exists, append a mapping table: every TSR finding →
    your issue number, plus a list of script-only findings the TSR missed.
 3. **Attention points** — for the reviewer, not the customer:
    TSR-vs-data discrepancies, findings you could not verify (and why),
    collection anomalies (empty files, .err contents), questions to ask the
    customer, data-freshness and confidentiality warnings.
+
+## Mandatory notice (in every deliverable)
+
+Your output is AI-generated analysis of a point-in-time bundle. You can be
+wrong about a finding, about its severity, and about what would fix it — and
+the reader may act on a production cluster. Put this block, verbatim, right
+under the title of **each** of the three files:
+
+> **Read before acting.** This report was written by an AI model from a point-in-time data bundle, with no access to the live cluster, its business context or current Red Hat documentation.
+>
+> - **Findings can be wrong or incomplete.** A finding is a lead to investigate, not a confirmed defect, and the absence of a finding is not proof of health.
+> - **Severity levels are estimates.** CRITICAL / HIGH / MEDIUM / LOW / INFO come from generic rules and may be too high or too low for this cluster.
+> - **Suggested directions are not instructions.** Take no step on a cluster before you understand it, have verified it against the live cluster and the current Red Hat documentation for the installed version, have tested it outside production, and have approval through your change process.
+
+This is not boilerplate to satisfy and then ignore; write the whole review
+accordingly:
+
+- **Never use the words "mitigation", "fix" or "remediation" as a heading or
+  field name**, and never phrase a suggestion as an order. The field is
+  called **Suggested direction (verify first)**.
+- **No state-changing commands.** Do not write `oc patch`, `oc delete`,
+  `oc apply`, `oc edit`, `oc scale`, `oc adm …` (other than read-only ones)
+  or any other command that changes a cluster, not even as an example.
+  Describe what to change and point to the Red Hat documentation for the
+  installed version; read-only `oc get` commands for verification are fine.
+- **Severity is your estimate.** You do not know the business context, the
+  compensating controls, or what changed since collection. Say so when a
+  severity depends on something you cannot see, and give the condition that
+  would raise or lower it.
+- **State your confidence.** When a finding rests on inference (names,
+  thresholds, knowledge of versions and lifecycles that may be outdated),
+  mark it as an assumption and say how to check it.
+- **A missing finding is not a clean bill of health** — never write that an
+  area "is fine" unless the bundle positively shows it.
 
 ## Rules
 

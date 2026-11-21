@@ -1402,6 +1402,98 @@ class TestOvnkubeCoverage(unittest.TestCase):
             self.assertEqual(titles(a), ["1 node(s) without an ovnkube-node pod"])
 
 
+class TestReportsAreNotWorkOrders(unittest.TestCase):
+    """Findings, severities and suggestions can be wrong - the output must
+    say so where the reader meets it, and must not invite copy-paste."""
+
+    WRITE_CMD = re.compile(
+        r"\b(?:oc|kubectl)\s+(?:patch|delete|apply|create|edit|scale|label|"
+        r"annotate|set|replace|rollout|debug|exec|rsh|"
+        r"adm\s+(?!top\b|upgrade\b)\w+)")
+
+    def reports(self, t):
+        a = analyzer(t, {"07-kubeadmin-exists.txt": "secret/kubeadmin\n",
+                         "07-etcd-encryption.txt": "(empty result)\n"})
+        a.run()
+        self.assertTrue(a.findings)
+        return {"overview": oa.render_overview(a, "b"),
+                "issues": oa.render_issues(a, "b"),
+                "attention": oa.render_attention(a, "b"),
+                "guide": oa.render_guide(a, "b")}
+
+    def test_every_report_opens_with_the_notice(self):
+        with tempfile.TemporaryDirectory() as t:
+            for name, text in self.reports(t).items():
+                head = "\n".join(text.splitlines()[:12])
+                for sentence in ("Read before acting",
+                                 "Findings can be wrong or incomplete",
+                                 "Severity levels are estimates",
+                                 "Suggested directions are not instructions"):
+                    self.assertIn(sentence, head, name)
+
+    def test_issue_wording(self):
+        with tempfile.TemporaryDirectory() as t:
+            issues = self.reports(t)["issues"]
+            self.assertIn("- **Suggested direction (verify first):**", issues)
+            self.assertNotIn("Recommendation", issues)
+            headers = re.findall(r"^## (?:CRITICAL|HIGH|MEDIUM|LOW|INFO).*$",
+                                 issues, re.M)
+            self.assertTrue(headers)
+            for h in headers:
+                self.assertTrue(h.endswith("(estimated)"), h)
+
+    def test_findings_json_carries_the_notice(self):
+        import json
+        import subprocess
+        with tempfile.TemporaryDirectory() as t:
+            b = make_bundle(t, {"07-kubeadmin-exists.txt": "secret/kubeadmin\n"})
+            out = Path(t) / "out"
+            r = subprocess.run([sys.executable, str(REPO / "ocp_analyzer.py"),
+                                str(b), "-o", str(out)], check=True,
+                               stdout=subprocess.PIPE, universal_newlines=True)
+            self.assertIn("can be wrong", r.stdout)
+            data = json.loads((out / "findings.json").read_text())
+            self.assertEqual(len(data["notice"]), len(oa.NOTICE))
+            self.assertIn("estimated", data["field_notes"]["sev"])
+
+    def test_no_state_changing_commands_in_suggestions(self):
+        """Static scan of every self.add(...) call: the suggestion (6th
+        argument) must describe a direction, never a command to paste."""
+        import ast
+        tree = ast.parse((REPO / "ocp_analyzer.py").read_text())
+        bad = []
+        for n in ast.walk(tree):
+            if (isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+                    and n.func.attr == "add" and len(n.args) >= 6):
+                text = " ".join(c.value for c in ast.walk(n.args[5])
+                                if isinstance(c, ast.Constant)
+                                and isinstance(c.value, str))
+                if self.WRITE_CMD.search(text):
+                    bad.append((n.lineno, self.WRITE_CMD.search(text).group(0)))
+        self.assertEqual(bad, [])
+
+    def test_the_word_mitigation_is_gone(self):
+        for rel in ("ocp_analyzer.py", "README.md", "collect-ocp-review.sh",
+                    "sanitize-ocp-bundle.py"):
+            self.assertNotIn("mitigation", (REPO / rel).read_text().lower(),
+                             rel)
+        skill = (REPO / "skills/ocp-bundle-review/SKILL.md").read_text()
+        # the skill may only mention the word to forbid it
+        for line in skill.lower().splitlines():
+            if "mitigation" in line:
+                self.assertIn("never use the words", line)
+
+    def test_skill_carries_the_same_notice_and_rules(self):
+        skill = " ".join((REPO / "skills/ocp-bundle-review/SKILL.md")
+                         .read_text().split())
+        for n in oa.NOTICE[1:]:
+            self.assertIn(" ".join(n.split()), skill)
+        self.assertIn("written by an AI model", skill)
+        self.assertIn("**Suggested direction (verify first)**", skill)
+        self.assertIn("No state-changing commands", skill)
+        self.assertIn("**How to verify**", skill)
+
+
 class TestCollectorScript(unittest.TestCase):
     """Static checks on collect-ocp-review.sh (no cluster needed)."""
 

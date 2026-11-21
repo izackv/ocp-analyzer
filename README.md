@@ -205,9 +205,10 @@ python3 ocp_analyzer.py BUNDLE_DIR [-o OUTDIR]
 Generates three markdown reports:
 
 - `architecture-overview.md` — what the cluster *is*: topology, versions, stack.
-- `issues.md` — findings ranked CRITICAL/HIGH/MEDIUM/LOW/INFO, each with
-  evidence, risk, and recommendation. Heuristic assumptions are stated
-  explicitly in the report.
+- `issues.md` — findings ranked by *estimated* severity
+  (CRITICAL/HIGH/MEDIUM/LOW/INFO), each with evidence, risk, and a suggested
+  direction to verify. Heuristic assumptions are stated explicitly in the
+  report.
 - `manual-review-guide.md` — what a human should still check per file, i.e.
   everything the heuristics cannot judge.
 
@@ -267,8 +268,8 @@ have one), open a Claude Code session (`claude`), and run:
 or just ask: *"review the OCP bundle in this folder"*. The skill directs
 Claude to produce the same three documents as a full manual review:
 `<cluster>-architecture-review.md`, `<cluster>-issues.md` (each issue with
-Source/Evidence/Risk/Mitigation and a TSR-mapping appendix when a TSR is
-present), and `<cluster>-attention-points.md` (discrepancies, unverifiable
+Source/Evidence/Risk/Suggested direction/How to verify, and a TSR-mapping
+appendix when a TSR is present), and `<cluster>-attention-points.md` (discrepancies, unverifiable
 findings, questions for the customer).
 
 ### Using other agents / local models
@@ -415,6 +416,26 @@ If this toolkit is useful to you, you may also be interested in:
 *ocp-analyzer is an independent personal project. It is **not** affiliated
 with, endorsed by, or maintained by Red Hat or the Red Hat Insights team; the
 link above is provided purely as a helpful pointer.*
+
+## Read this before acting on a report
+
+Every report this toolkit produces — the Python analyzer's and, even more,
+the AI review's — is a set of **leads to investigate, not a work order**.
+Each generated file opens with the same notice, because the person reading a
+report rarely reads this README:
+
+- **Findings can be wrong or incomplete.** They come from a point-in-time
+  bundle, generic rules and (in the AI review) a language model, with no
+  access to the live cluster or its business context. The absence of a
+  finding is not proof of health.
+- **Severity levels are estimates.** CRITICAL/HIGH/MEDIUM/LOW/INFO may be
+  too high or too low for your cluster; the reports mark them "(estimated)".
+- **Suggested directions are not instructions.** The reports deliberately
+  say "Suggested direction (verify first)" and contain no commands that
+  change a cluster. Take no step before you understand it, have verified it
+  against the live cluster and the current Red Hat documentation for the
+  installed version, have tested it outside production, and have approval
+  through your change process.
 
 ## License & disclaimer
 
