@@ -4,6 +4,13 @@ All notable changes to this toolkit are recorded here. Dates are ISO (YYYY-MM-DD
 
 ## [Unreleased]
 
+## [2026.11] - 2026-11-21
+
+OpenShift AI and GPU coverage, and a change in how reports are worded:
+findings are leads to verify, not work orders. Bundle format unchanged (2).
+`BUILD_KNOWLEDGE_DATE` stays 2026-07 - only the OpenShift AI facts were
+refreshed, and they carry their own date (2026-11).
+
 ### Added
 
 - OpenShift AI / Kueue / training coverage: new collector section 13
