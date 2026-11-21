@@ -221,6 +221,31 @@ class SanitizerOptionsTest(unittest.TestCase):
         self.assertIn("secret: REDACTED-OAUTH-SECRET", out)
         self.assertIn("name: openid-client-secret", out)
 
+    def test_rhoai_encoded_usernames_in_workbench_names(self):
+        """OpenShift AI embeds the username, hex-escaped, in workbench names
+        (13-rhoai-notebooks.txt) and from there in pods, PVCs and Kueue
+        workloads. The escaped form must be pseudonymized as well."""
+        (self.bundle / "07-users.txt").write_text(
+            "NAME             UID   FULL NAME   IDENTITIES\n"
+            "pat.doe@lab.test   x                 sso:pat\n"
+            "jsmith           y                 sso:jsmith\n")
+        (self.bundle / "13-rhoai-notebooks.txt").write_text(
+            "NAMESPACE         NAME                                AGE\n"
+            "rhods-notebooks   jupyter-nb-pat-2edoe-40lab-2etest   3d\n"
+            "rhods-notebooks   jupyter-nb-jsmith                   9d\n")
+        (self.bundle / "13-kueue-workloads.txt").write_text(
+            "NAMESPACE         NAME                                            QUEUE\n"
+            "rhods-notebooks   statefulset-jupyter-nb-pat-2edoe-40lab-2etest-1a2b3   default\n")
+        outdir = self.tmp / "out"
+        res = run_sanitizer(self.bundle, outdir)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        text = ((outdir / "13-rhoai-notebooks.txt").read_text()
+                + (outdir / "13-kueue-workloads.txt").read_text())
+        self.assertNotIn("2edoe", text)
+        self.assertNotIn("pat-", text)
+        self.assertNotIn("jsmith", text)
+        self.assertRegex(text, r"jupyter-nb-user\d{4}")
+
     def test_refuses_non_empty_output_dir(self):
         outdir = self.tmp / "out"
         outdir.mkdir()

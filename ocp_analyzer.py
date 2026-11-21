@@ -82,6 +82,29 @@ AUTOROTATED_ISSUER_RE = re.compile(
 PLATFORM_NS_RE = re.compile(
     r"^(openshift($|-)|kube-|default$|assisted-installer$)")
 
+# namespaces of the GPU stack itself (their pods belong on GPU nodes)
+GPU_STACK_NS = {"nvidia-gpu-operator", "nvidia-network-operator"}
+# pod states that still hold their resource requests on the node
+POD_HOLDING_STATES = ("Running", "ContainerCreating", "PodInitializing",
+                      "Terminating")
+# OpenShift AI component -> (managementState that needs it, CSV-name regex of
+# the separate operator it depends on, label). From the RHOAI 3.x docs.
+RHOAI_DEPENDENCIES = [
+    ("trainer", "Managed", r"jobset-operator|job-set", "JobSet Operator"),
+    ("kueue", "Unmanaged", r"kueue-operator", "Red Hat build of Kueue"),
+]
+# Known issues from the release notes, keyed by the RHOAI minor they were
+# published for. They go stale: prune/extend on every knowledge refresh.
+# The trigger conditions live in Analyzer.check_rhoai.
+RHOAI_KNOWLEDGE_DATE = "2026-11"
+RHOAI_KNOWN_ISSUES = {
+    "RHOAIENG-87625": ("3.5", "TrainJobs do not work together with Red Hat "
+                              "build of Kueue 1.4 or later"),
+    "RHOAIENG-67403": ("3.5", "with kueue=Unmanaged, hardware profiles that "
+                              "carry node selectors or tolerations may not "
+                              "be offered for workbenches"),
+}
+
 # per-file collection status (tri-state semantics for .err / empty files)
 S_OK = "ok"                        # file present with content
 S_EMPTY = "empty"                  # present, "(empty result)" = verified zero
@@ -121,6 +144,7 @@ FILE_COMMANDS = {
     "02-nodes-capacity.txt": "oc get nodes -o custom-columns=...",
     "02-nodes-conditions.txt": "oc get nodes -o 'custom-columns=NAME:.metadata.name,READY:.status.conditions[?(@.type=='Ready')].status,MEM-PRESSURE:.status.conditions[?(@.type=='MemoryPressure')].status,DISK-PRESSURE:.status.conditions[?(@.type=='DiskPressure')].status,PID-PRESSURE:.status.conditions[?(@.type=='PIDPressure')].status,NET-UNAVAIL:.status.conditions[?(@.type=='NetworkUnavailable')].status,TAINTS:.spec.taints[*].key'",
     "02-nodes-roles-zones.txt": "oc get nodes -L <labels>",
+    "02-nodes-taints.txt": "oc get nodes -o custom-columns=...",
     "02-nodes-wide.txt": "oc get nodes -o wide",
     "02-top-nodes.txt": "oc adm top nodes",
     "02-tuned.txt": "oc get tuned -n openshift-cluster-node-tuning-operator",
@@ -140,8 +164,8 @@ FILE_COMMANDS = {
     "03-routes.txt": "oc get routes -A",
     "03-services-all.txt": "oc get svc -A",
     "03-sriov.txt": "oc get sriovnetworknodepolicy,sriovnetwork -A",
-    "03-whereabouts-ippools.yaml": "oc get ippools -A -o yaml",
-    "03-whereabouts-overlap.txt": "oc get overlappingrangeipreservations -A",
+    "03-whereabouts-ippools.yaml": "oc get ippools.whereabouts.cni.cncf.io -A -o yaml",
+    "03-whereabouts-overlap.txt": "oc get overlappingrangeipreservations.whereabouts.cni.cncf.io -A",
     "04-cephblockpool.txt": "oc get cephblockpool -n openshift-storage",
     "04-cephcluster.txt": "oc get cephcluster -n openshift-storage",
     "04-cephfilesystem.txt": "oc get cephfilesystem -n openshift-storage",
@@ -178,8 +202,8 @@ FILE_COMMANDS = {
     "06-workloads-status.txt": "oc get deploy,statefulset -A -o custom-columns=...",
     "06-workloads.txt": "oc get deploy,statefulset,daemonset -A",
     "07-acm-policies.txt": "oc get policies.policy.open-cluster-management.io -A",
-    "07-acs-central.txt": "oc get central -A",
-    "07-acs-secured.txt": "oc get securedcluster -A",
+    "07-acs-central.txt": "oc get centrals.platform.stackrox.io -A",
+    "07-acs-secured.txt": "oc get securedclusters.platform.stackrox.io -A",
     "07-cert-expiry.txt": "oc get secret -A -o custom-columns=...",
     "07-certificates.txt": "oc get certificates.cert-manager.io -A",
     "07-clusterrolebindings.txt": "oc get clusterrolebinding -o wide",
@@ -197,7 +221,7 @@ FILE_COMMANDS = {
     "07-scc.yaml": "oc get scc -o yaml",
     "07-users.txt": "oc get user",
     "07-webhooks.txt": "oc get mutatingwebhookconfiguration,validatingwebhookconfiguration -o custom-columns=...",
-    "08-active-alerts.json": "oc get --request-timeout=20s --raw '/api/v1/namespaces/openshift-monitoring/services/alertmanager-main:9094/proxy/api/v2/alerts?active=true'",
+    "08-active-alerts.json": "curl (GET, session token) https://<alertmanager-main route>/api/v2/alerts?active=true  [collector --alerts]",
     "08-alertmanagerconfig.txt": "oc get alertmanagerconfig -A",
     "08-cluster-monitoring.yaml": "oc get configmap cluster-monitoring-config -n openshift-monitoring -o yaml",
     "08-clusterlogging.txt": "oc get clusterlogging,clusterlogforwarder -n openshift-logging",
@@ -216,19 +240,36 @@ FILE_COMMANDS = {
     "10-etcd-backup-fg.txt": "oc get featuregate cluster -o jsonpath=...",
     "10-kasten-policies.txt": "oc get policies.config.kio.kasten.io -A",
     "10-oadp-dpa.txt": "oc get dataprotectionapplication -A",
-    "10-velero-crs.txt": "oc get backup,restore,schedule -A",
+    "10-velero-crs.txt": "oc get backups.velero.io,restores.velero.io,schedules.velero.io -A",
     "11-events-warning.txt": "oc get events -A --field-selector type=Warning --sort-by=.lastTimestamp",
-    "12-clusterpolicy.yaml": "oc get clusterpolicy -A -o yaml",
+    "12-clusterpolicy.yaml": "oc get clusterpolicies.nvidia.com -o yaml",
     "12-gpu-capacity.txt": "oc get nodes -o custom-columns=...",
     "12-gpu-consumers.txt": "oc get pods -A -o custom-columns=...",
     "12-gpu-node-labels.txt": "oc get nodes -L <labels>",
     "12-gpu-operator-pods.txt": "oc get pods -n nvidia-gpu-operator -o wide",
-    "12-nfd.txt": "oc get nodefeaturediscovery -A",
-    "12-nicclusterpolicy.yaml": "oc get nicclusterpolicy -A -o yaml",
+    "12-gpu-servicemonitors.txt": "oc get servicemonitors.monitoring.coreos.com -n nvidia-gpu-operator",
+    "12-gpu-sharing.txt": "oc get nodes -l nvidia.com/gpu.present=true -o custom-columns=...",
+    "12-nfd.txt": "oc get nodefeaturediscoveries.nfd.openshift.io -A",
+    "12-nicclusterpolicy.yaml": "oc get nicclusterpolicies.mellanox.com -o yaml",
     "12-nv-network-pods.txt": "oc get pods -n nvidia-network-operator -o wide",
     "12-nvidia-networks.txt": "oc get macvlannetwork,hostdevicenetwork,ipoibnetwork -A",
     "12-performanceprofile.yaml": "oc get performanceprofile -o yaml",
     "12-sriov-node-state.txt": "oc get sriovnetworknodestate -n openshift-sriov-network-operator",
+    "13-kueue-clusterqueues.txt": "oc get clusterqueues.kueue.x-k8s.io",
+    "13-kueue-localqueues.txt": "oc get localqueues.kueue.x-k8s.io -A",
+    "13-kueue-operator.txt": "oc get kueues.kueue.openshift.io -A",
+    "13-kueue-resourceflavors.txt": "oc get resourceflavors.kueue.x-k8s.io",
+    "13-kueue-workloads.txt": "oc get workloads.kueue.x-k8s.io -A",
+    "13-pytorchjobs.txt": "oc get pytorchjobs.kubeflow.org -A",
+    "13-rhoai-auth.txt": "oc get auths.services.platform.opendatahub.io -o custom-columns=...",
+    "13-rhoai-dsc.yaml": "oc get datascienceclusters.datasciencecluster.opendatahub.io -o yaml",
+    "13-rhoai-dsci.yaml": "oc get dscinitializations.dscinitialization.opendatahub.io -o yaml",
+    "13-rhoai-dspa.txt": "oc get datasciencepipelinesapplications.datasciencepipelinesapplications.opendatahub.io -A",
+    "13-rhoai-hardwareprofiles.txt": "oc get hardwareprofiles.infrastructure.opendatahub.io -A",
+    "13-rhoai-inferenceservices.txt": "oc get inferenceservices.serving.kserve.io -A",
+    "13-rhoai-notebooks.txt": "oc get notebooks.kubeflow.org -A",
+    "13-trainingruntimes.txt": "oc get clustertrainingruntimes.trainer.kubeflow.org",
+    "13-trainjobs.txt": "oc get trainjobs.trainer.kubeflow.org -A",
 }
 
 
@@ -402,6 +443,52 @@ def parse_named_conditions(text):
         name = yaml_grab(yaml_block(chunk, "metadata") or chunk, "name")
         if name:
             out[name] = parse_conditions(chunk)
+    return out
+
+
+def dsc_components(block):
+    """{component: managementState} from a DataScienceCluster components block.
+
+    Only the component's own state counts; nested sub-module states
+    (kserve.nim.managementState ...) sit deeper and are ignored.
+    """
+    out, cur, base = {}, None, None
+    for line in (block or "").splitlines():
+        if not line.strip():
+            continue
+        ind = len(line) - len(line.lstrip())
+        if base is None:
+            base = ind
+        s = line.strip()
+        m = re.match(r"([A-Za-z0-9_]+):", s)
+        if ind == base and m:
+            cur = m.group(1)
+            out[cur] = None
+        elif cur and ind == base + 2 and s.startswith("managementState:"):
+            out[cur] = s.split(":", 1)[1].strip().strip("'\"")
+    return out
+
+
+def dsc_platform_versions(block):
+    """{component: platform version} from the DSC status.components block
+    (each component lists its releases; the entry named `platform` is the
+    OpenShift AI release that component was built for)."""
+    out, cur, base, armed = {}, None, None, False
+    for line in (block or "").splitlines():
+        if not line.strip():
+            continue
+        ind = len(line) - len(line.lstrip())
+        if base is None:
+            base = ind
+        s = line.strip()
+        m = re.match(r"([A-Za-z0-9_]+):", s)
+        if ind == base and m:
+            cur, armed = m.group(1), False
+        elif s.startswith("- name:"):
+            armed = s.split(":", 1)[1].strip() == "platform"
+        elif armed and cur and s.startswith("version:"):
+            out[cur] = s.split(":", 1)[1].strip().strip("'\"")
+            armed = False
     return out
 
 
@@ -1779,6 +1866,11 @@ class Analyzer(object):
                             "finding is a mandatory manual verification, not "
                             "a confirmed defect.")
         alerts = self.b.read("08-active-alerts.json")
+        if self.b.status("08-active-alerts.json") == S_MISSING:
+            self.assumptions.append(
+                "Firing alerts were NOT collected (the collector saves them "
+                "only when run with --alerts): the cluster's alert state at "
+                "collection time is UNKNOWN - check Observe > Alerting.")
         if alerts:
             try:
                 data = json.loads(alerts)
@@ -1804,6 +1896,40 @@ class Analyzer(object):
            not self.b.exists("08-lokistack.txt"):
             pass  # logging stack finding handled in check_olm via CSV version
 
+    def _pod_states(self):
+        """{(namespace, pod): (status, age)} from 06-pods-all.txt."""
+        out = {}
+        for line in self.b.lines("06-pods-all.txt"):
+            # RESTARTS can read "3 (2d7h ago)" - drop the parenthesis so the
+            # columns after it stay in place
+            tok = re.sub(r"\(\S+ ago\)", "", line).split()
+            if len(tok) >= 6:
+                out[(tok[0], tok[1])] = (tok[3], tok[5])
+        return out
+
+    def _node_taints(self):
+        """{node: [(taint key, effect or None)]}; None when not collected."""
+        out = {}
+        rows = self.b.lines("02-nodes-taints.txt")
+        if rows:
+            for l in rows:
+                tok = l.split()
+                if len(tok) < 2:
+                    continue
+                keys = [] if tok[1] == "<none>" else tok[1].split(",")
+                effs = tok[2].split(",") if len(tok) > 2 else []
+                if len(effs) != len(keys):
+                    effs = [None] * len(keys)
+                out[tok[0]] = list(zip(keys, effs))
+            return out
+        rows = self.b.lines("02-nodes-conditions.txt")   # keys only
+        for l in rows:
+            tok = l.split()
+            if len(tok) >= 7:
+                keys = [] if tok[6] == "<none>" else tok[6].split(",")
+                out[tok[0]] = [(k, None) for k in keys]
+        return out or None
+
     def check_gpu(self):
         rows = self.b.lines("12-gpu-capacity.txt")
         gpus = [(l.split()[0], l.split()[1]) for l in rows
@@ -1814,14 +1940,48 @@ class Analyzer(object):
             lbl = self.b.read("12-gpu-node-labels.txt") or self.b.read("02-gpu-nodes.txt") or ""
             if "true" not in lbl:
                 return
-        consumers = 0
+        gpu_node_names = set(n for n, _ in gpus)
+
+        # ---- who holds GPUs, and what else runs on the GPU nodes
+        states = self._pod_states()
+        notebooks = set()
+        for l in self.b.lines("13-rhoai-notebooks.txt"):
+            tok = l.split()
+            if len(tok) >= 2:
+                notebooks.add((tok[0], tok[1]))
+        consumers, used, holders, squatters = 0, {}, [], {}
         for l in self.b.lines("12-gpu-consumers.txt"):
             tok = l.split()
-            if len(tok) >= 4 and tok[3][:1].isdigit():
+            if len(tok) < 4:
+                continue
+            ns, pod, node, lim = tok[0], tok[1], tok[2], tok[3]
+            status, age = states.get((ns, pod), ("Running", "?"))
+            holding = status in POD_HOLDING_STATES or status.startswith("Init:")
+            if lim[:1].isdigit():
                 consumers += 1
+                n = sum(int(x) for x in lim.split(",") if x.isdigit())
+                if holding and n:
+                    used[node] = used.get(node, 0) + n
+                    wb = pod.endswith("-0") and (ns, pod[:-2]) in notebooks
+                    holders.append(("%s/%s (%d GPU, age %s%s)"
+                                    % (ns, pod, n, age,
+                                       ", workbench" if wb else ""), wb))
+            elif (node in gpu_node_names and status == "Running"
+                  and not PLATFORM_NS_RE.match(ns)
+                  and ns not in GPU_STACK_NS):
+                squatters.setdefault(node, []).append("%s/%s" % (ns, pod))
         self.facts["gpu_consumers"] = consumers
-        if gpus and not (self.b.read("12-clusterpolicy.yaml") or
-                         self.b.read("02-clusterpolicy.txt")):
+
+        # ---- GPU Operator ClusterPolicy
+        cp = (self.b.read("12-clusterpolicy.yaml") or
+              self.b.read("02-clusterpolicy.txt") or "")
+        if "kyverno.io" in cp and "nvidia.com/v" not in cp:
+            cp = ""    # older collectors: bare name hit Kyverno's CRD
+            self.assumptions.append(
+                "12-clusterpolicy.yaml holds Kyverno ClusterPolicies, not "
+                "the NVIDIA one (older collector used an unqualified "
+                "resource name); the GPU Operator state was NOT assessed.")
+        elif gpus and not cp.strip().replace("(empty result)", ""):
             self.add("HIGH", "GPU",
                      "GPU nodes present but no GPU Operator ClusterPolicy found",
                      "12-gpu-capacity.txt shows GPU capacity; clusterpolicy "
@@ -1829,14 +1989,367 @@ class Analyzer(object):
                      "GPUs may be driven by manually installed drivers - "
                      "unmanaged and upgrade-fragile.",
                      "Deploy/repair the NVIDIA GPU Operator.")
+        cp_state = yaml_grab(yaml_block(cp, "status"), "state")
+        if cp_state:
+            self.facts["gpu_clusterpolicy_state"] = cp_state
+            if cp_state != "ready":
+                self.add("HIGH", "GPU",
+                         "GPU Operator ClusterPolicy state is '%s'" % cp_state,
+                         "12-clusterpolicy.yaml: status.state: %s (expected "
+                         "`ready`)." % cp_state,
+                         "The driver / toolkit / device-plugin chain is not "
+                         "fully rolled out: GPUs may be missing from node "
+                         "capacity and GPU pods may fail to start.",
+                         "Check the pods in 12-gpu-operator-pods.txt and the "
+                         "ClusterPolicy conditions; fix the failing operand.")
+            else:
+                self.green("GPU", "GPU Operator ClusterPolicy state is ready")
+
+        # ---- allocatable vs capacity
+        short, total_alloc = [], 0
+        for l in rows:
+            tok = l.split()
+            if len(tok) >= 3 and tok[1].isdigit():
+                alloc = int(tok[2]) if tok[2].isdigit() else 0
+                total_alloc += alloc
+                if alloc < int(tok[1]):
+                    short.append("%s (%d of %s)" % (tok[0], alloc, tok[1]))
+        if short:
+            self.add("HIGH", "GPU",
+                     "%d GPU node(s) offer fewer GPUs to pods than they have"
+                     % len(short),
+                     "12-gpu-capacity.txt, allocatable < capacity: "
+                     + "; ".join(short[:6]),
+                     "The missing GPUs cannot be scheduled. Typical causes: "
+                     "device plugin or driver not healthy on the node, a GPU "
+                     "that failed (XID error) or a node being reconfigured "
+                     "(MIG change).",
+                     "Check the device-plugin and driver pods on those nodes "
+                     "(12-gpu-operator-pods.txt) and the node events.")
+
+        # ---- sharing: time-slicing / MIG
+        sharing_seen = self.b.status("12-gpu-sharing.txt") == S_OK
+        sliced, mig = [], []
+        for l in self.b.lines("12-gpu-sharing.txt"):
+            tok = l.split()
+            if len(tok) < 7:
+                continue
+            node, product, repl, mig_cfg = tok[0], tok[1], tok[3], tok[6]
+            if (repl.isdigit() and int(repl) > 1) or product.endswith("-SHARED"):
+                sliced.append("%s (%s, replicas=%s)" % (node, product, repl))
+            if mig_cfg not in ("<none>", "all-disabled"):
+                mig.append("%s (mig.config=%s)" % (node, mig_cfg))
+        self.facts["gpu_sharing"] = (
+            ("time-slicing on %d node(s)" % len(sliced) if sliced else "")
+            + ("; " if sliced and mig else "")
+            + ("MIG on %d node(s)" % len(mig) if mig else "")
+        ) or ("whole GPUs (no time-slicing, no MIG)" if sharing_seen else None)
+        if sliced:
+            self.add("LOW", "GPU",
+                     "GPU time-slicing is active on %d node(s)" % len(sliced),
+                     "12-gpu-sharing.txt: " + "; ".join(sliced[:6]),
+                     "A pod that requests `nvidia.com/gpu: 1` gets a share of "
+                     "a GPU, not a whole one: no memory or fault isolation "
+                     "between the pods, and the GPU count in node capacity "
+                     "is multiplied by the replica count. Training jobs "
+                     "sized for whole GPUs run slower or hit out-of-memory.",
+                     "Confirm time-slicing is intended for these nodes; keep "
+                     "it off on nodes meant for training or benchmarks.",
+                     question="Is GPU time-slicing intended on the nodes "
+                              "where it is active, and do the users know a "
+                              "'GPU' there is a shared one?")
+
+        # ---- GPU nodes any pod can land on
+        taints = self._node_taints()
+        if taints is not None and gpus:
+            open_nodes = []
+            for node in sorted(gpu_node_names):
+                if node not in taints:
+                    continue
+                blocking = [k for k, eff in taints[node]
+                            if not k.startswith("node.kubernetes.io/")
+                            and eff in (None, "NoSchedule", "NoExecute")]
+                if not blocking:
+                    open_nodes.append(node)
+            if open_nodes:
+                on_them = [p for n in open_nodes for p in squatters.get(n, [])]
+                self.add("LOW", "GPU",
+                         "%d GPU node(s) have no taint - any pod can be "
+                         "scheduled on them" % len(open_nodes),
+                         "Node taints: " + ", ".join(open_nodes[:6])
+                         + " carry no NoSchedule/NoExecute taint."
+                         + (" Running there without requesting a GPU: "
+                            + ", ".join(on_them[:6])
+                            + ("..." if len(on_them) > 6 else "") + "."
+                            if on_them else ""),
+                         "Ordinary workloads can fill the CPU and memory of "
+                         "the most expensive nodes, so a GPU job finds free "
+                         "GPUs but no room to start.",
+                         "Taint the GPU nodes (e.g. `nvidia.com/gpu`:"
+                         "NoSchedule) and add the toleration to GPU "
+                         "workloads only (in OpenShift AI: via the hardware "
+                         "profile).",
+                         assumption="Pods listed as running there may be "
+                                    "third-party DaemonSet pods (agents), "
+                                    "which are expected on every node - "
+                                    "judge by name.")
+
+        # ---- everything allocated
+        total_used = sum(used.values())
+        if total_alloc and total_used >= total_alloc:
+            wb = [h for h, is_wb in holders if is_wb]
+            self.add("LOW" if wb else "INFO", "GPU",
+                     "All %d allocatable GPU(s) are in use - a new GPU "
+                     "workload will stay Pending" % total_alloc,
+                     "12-gpu-capacity.txt vs 12-gpu-consumers.txt; holders: "
+                     + "; ".join(h for h, _ in holders[:8])
+                     + ("..." if len(holders) > 8 else ""),
+                     "No GPU headroom at collection time."
+                     + (" %d holder(s) are workbenches: an interactive "
+                        "workbench keeps its GPU for as long as it runs, "
+                        "also while nobody uses it, and blocks training "
+                        "jobs." % len(wb) if wb else ""),
+                     ("Stop idle GPU workbenches (or enable idle culling) "
+                      "and reserve GPUs for jobs through Kueue quotas. "
+                      if wb else "")
+                     + "Check GPU utilization in DCGM metrics before adding "
+                       "hardware: allocated is not the same as busy.")
         if gpus and consumers == 0:
             self.add("LOW", "GPU",
                      "GPU capacity present but no pod requests GPUs",
                      "12-gpu-consumers.txt: zero pods with nvidia.com/gpu "
                      "limits.",
-                     "Expensive accelerators sitting idle (or consumed via "
-                     "time-slicing not visible in limits).",
+                     "Expensive accelerators sitting idle"
+                     + ("." if sharing_seen else
+                        " (or consumed via time-slicing not visible in "
+                        "limits)."),
                      "Confirm intended usage/MIG/time-slicing configuration.")
+
+        # ---- GPU metrics
+        sm = self.b.status("12-gpu-servicemonitors.txt")
+        if gpus and cp_state and (
+                sm == S_EMPTY or (sm == S_OK and "dcgm" not in
+                                  self.b.read("12-gpu-servicemonitors.txt"))):
+            self.add("LOW", "GPU",
+                     "GPU metrics (DCGM) are not scraped by cluster monitoring",
+                     "12-gpu-servicemonitors.txt: no dcgm-exporter "
+                     "ServiceMonitor in nvidia-gpu-operator.",
+                     "No GPU utilization, memory or temperature history, and "
+                     "no GPU alerts: idle or failing GPUs go unnoticed.",
+                     "Enable the DCGM exporter ServiceMonitor in the "
+                     "ClusterPolicy and label the namespace with "
+                     "`openshift.io/cluster-monitoring=true`.")
+
+    def check_rhoai(self):
+        """OpenShift AI (RHOAI / Open Data Hub), Kueue and training jobs."""
+        dsc = self.b.read("13-rhoai-dsc.yaml") or ""
+        csv_ok = self.b.status("05-csv.txt") == S_OK
+        csv_names = " ".join(l.split()[1] for l in self.b.lines("05-csv.txt")
+                             if len(l.split()) > 1)
+        installed = "kind: DataScienceCluster" in dsc
+        f = {}
+        status = yaml_block(dsc, "status")
+        m = re.search(r"^\s*release:\s*\n\s*name:[^\n]*\n\s*version:\s*(\S+)",
+                      status, re.M)
+        version = m.group(1).strip("'\"") if m else None
+        if not version:
+            m = re.search(r"\b(?:rhods|opendatahub)-operator\.v?(\d+\.\d+\.\d+)",
+                          csv_names)
+            version = m.group(1) if m else None
+        comps = dsc_components(yaml_block(yaml_block(dsc, "spec"),
+                                          "components"))
+
+        if installed:
+            phase = yaml_grab(status, "phase") or "?"
+            f.update(version=version or "?", phase=phase,
+                     managed=sorted(c for c, st in comps.items()
+                                    if st == "Managed"))
+            bad = [c for c in parse_conditions(status)
+                   if c.get("status") == "False"
+                   and c.get("reason") != "Removed"]
+            dsci_phase = yaml_grab(yaml_block(
+                self.b.read("13-rhoai-dsci.yaml") or "", "status"), "phase")
+            if dsci_phase and dsci_phase != "Ready":
+                bad.append({"type": "DSCInitialization",
+                            "reason": "phase %s" % dsci_phase})
+            if phase != "Ready" or bad:
+                self.add("HIGH" if phase != "Ready" else "MEDIUM",
+                         "AI platform",
+                         "OpenShift AI is not fully healthy (phase %s, %d "
+                         "condition(s) failing)" % (phase, len(bad)),
+                         "13-rhoai-dsc.yaml: status.phase: %s; " % phase
+                         + "; ".join("%s (%s%s)" % (
+                             c.get("type", "?"), c.get("reason", "no reason"),
+                             ": " + c["message"][:140]
+                             if c.get("message") else "") for c in bad[:6]),
+                         "The affected components (workbenches, model "
+                         "serving, training, pipelines ...) may not "
+                         "reconcile or may be unavailable to the users.",
+                         "Read the failing conditions and the "
+                         "rhods-operator log; fix the component or set it "
+                         "to Removed if it is not used.")
+            else:
+                self.green("AI platform",
+                           "DataScienceCluster is Ready; no component "
+                           "condition is failing")
+
+            # components built for an older platform release than the DSC
+            behind = sorted("%s=%s" % (c, v) for c, v in
+                            dsc_platform_versions(
+                                yaml_block(status, "components")).items()
+                            if version and v != version)
+            if behind:
+                self.add("INFO", "AI platform",
+                         "%d OpenShift AI component(s) report an older "
+                         "platform version than the release" % len(behind),
+                         "13-rhoai-dsc.yaml: release %s, but %s."
+                         % (version, ", ".join(behind[:8])),
+                         "After an operator update a component that stays "
+                         "behind may not have reconciled (stuck rollout, "
+                         "image pull problem).",
+                         "Compare the component's deployment images with "
+                         "the release; if the pods are old, look at the "
+                         "operator log for that component.",
+                         assumption="A component can legitimately keep an "
+                                    "older platform version when it did not "
+                                    "change between patch releases.")
+
+            # separate operators a component depends on
+            if csv_ok:
+                for comp, need_state, pat, label in RHOAI_DEPENDENCIES:
+                    if comps.get(comp) == need_state and \
+                       not re.search(pat, csv_names):
+                        self.add("MEDIUM", "AI platform",
+                                 "OpenShift AI component `%s` is %s but the "
+                                 "%s is not installed"
+                                 % (comp, need_state, label),
+                                 "13-rhoai-dsc.yaml: %s.managementState: %s; "
+                                 "05-csv.txt: no CSV matching /%s/."
+                                 % (comp, need_state, pat),
+                                 "The component cannot work without that "
+                                 "operator: its resources are accepted but "
+                                 "never acted on.",
+                                 "Install the %s, or change the component's "
+                                 "managementState." % label,
+                                 assumption="Dependency per the RHOAI 3.x "
+                                            "documentation; re-verify for "
+                                            "the installed version.")
+
+        # ---- training jobs
+        jobs, failed = {}, []
+        for name, kind in (("13-trainjobs.txt", "TrainJob"),
+                           ("13-pytorchjobs.txt", "PyTorchJob")):
+            for l in self.b.lines(name):
+                tok = l.split()
+                if len(tok) < 3:
+                    continue
+                state = tok[2] if len(tok) >= 4 else "(no state)"
+                jobs[state] = jobs.get(state, 0) + 1
+                if state == "Failed":
+                    failed.append("%s %s/%s (age %s)"
+                                  % (kind, tok[0], tok[1], tok[-1]))
+        if jobs:
+            f["train_jobs"] = jobs
+        if failed:
+            self.add("LOW", "AI platform",
+                     "%d failed training job(s)" % len(failed),
+                     "13-trainjobs.txt / 13-pytorchjobs.txt: "
+                     + "; ".join(failed[:6])
+                     + ("..." if len(failed) > 6 else ""),
+                     "Failed jobs are tenant workloads, but a shared cause "
+                     "(image pull, quota, storage, GPU out-of-memory, a "
+                     "platform known issue) will hit the next job as well.",
+                     "Ask the owners why they failed; check the job's "
+                     "events and pod logs, then delete the leftovers.",
+                     question="Why did the failed training jobs fail, and "
+                              "is the cause fixed?")
+
+        # ---- Kueue
+        lq_ns, pending = [], 0
+        for l in self.b.lines("13-kueue-localqueues.txt"):
+            tok = l.split()
+            if len(tok) >= 4:
+                lq_ns.append(tok[0])
+                pending += int(tok[3]) if tok[3].isdigit() else 0
+        cqs = len(self.b.lines("13-kueue-clusterqueues.txt"))
+        if cqs or lq_ns:
+            f["kueue"] = "%d ClusterQueue(s); queue-managed projects: %s" % (
+                cqs, ", ".join(sorted(set(lq_ns))) or "none")
+        if pending:
+            waiting = []
+            wl = self.b.lines("13-kueue-workloads.txt", skip_header=False)
+            for l in wl[1:]:
+                adm = col_slice(wl[0], l, "ADMITTED", ["FINISHED", "AGE"])
+                fin = col_slice(wl[0], l, "FINISHED", ["AGE"])
+                if adm != "True" and fin != "True" and len(l.split()) > 1:
+                    waiting.append("%s/%s" % tuple(l.split()[:2]))
+            self.add("LOW", "AI platform",
+                     "%d workload(s) are waiting in Kueue queues" % pending,
+                     "13-kueue-localqueues.txt: PENDING WORKLOADS total %d"
+                     % pending
+                     + ("; not admitted: " + ", ".join(waiting[:6])
+                        if waiting else ""),
+                     "Waiting is what a queue is for, but a workload that "
+                     "asks for more than the ClusterQueue quota (or for a "
+                     "flavor that does not exist) waits forever.",
+                     "Compare the request of each waiting workload with the "
+                     "ClusterQueue quota and ResourceFlavors.")
+
+        # ---- known issues for the installed release
+        def known(issue):
+            minor, text = RHOAI_KNOWN_ISSUES[issue]
+            return text if (version or "").startswith(minor + ".") else None
+
+        kv = re.search(r"\bkueue-operator\.v?(\d+)\.(\d+)", csv_names)
+        hits = []
+        if known("RHOAIENG-87625") and comps.get("trainer") == "Managed" \
+           and kv and (int(kv.group(1)), int(kv.group(2))) >= (1, 4):
+            hits.append(("RHOAIENG-87625", "kueue-operator %s.%s with "
+                         "trainer=Managed" % kv.groups()))
+        if known("RHOAIENG-67403") and comps.get("kueue") == "Unmanaged" \
+           and self.b.lines("13-rhoai-hardwareprofiles.txt"):
+            hits.append(("RHOAIENG-67403", "kueue=Unmanaged with %d hardware "
+                         "profile(s)"
+                         % len(self.b.lines("13-rhoai-hardwareprofiles.txt"))))
+        for issue, why in hits:
+            self.add("LOW", "AI platform",
+                     "Configuration matches OpenShift AI known issue %s"
+                     % issue,
+                     "OpenShift AI %s, %s." % (version, why),
+                     "Known issue: %s." % RHOAI_KNOWN_ISSUES[issue][1],
+                     "Read the known-issues section of the release notes "
+                     "for the installed version and test the affected "
+                     "function early.",
+                     assumption="Known-issue list baked in at build time "
+                                "(%s) for RHOAI %s; it may be fixed in the "
+                                "installed patch release - verify online."
+                                % (RHOAI_KNOWLEDGE_DATE,
+                                   RHOAI_KNOWN_ISSUES[issue][0]))
+
+        # ---- dashboard access
+        for l in self.b.lines("13-rhoai-auth.txt"):
+            tok = l.split()
+            if len(tok) >= 3 and "system:authenticated" in tok[2].split(","):
+                self.add("INFO", "AI platform",
+                         "Every authenticated user can use the OpenShift AI "
+                         "dashboard",
+                         "13-rhoai-auth.txt: allowedGroups contains "
+                         "`system:authenticated` (the product default).",
+                         "Anyone who can log in to the cluster can create "
+                         "projects, workbenches and model deployments, "
+                         "bounded only by quotas.",
+                         "Restrict allowedGroups to the data-science groups "
+                         "if the cluster is shared with other teams.")
+
+        for key, name in (("workbenches", "13-rhoai-notebooks.txt"),
+                          ("models", "13-rhoai-inferenceservices.txt"),
+                          ("pipeline_servers", "13-rhoai-dspa.txt"),
+                          ("hardware_profiles",
+                           "13-rhoai-hardwareprofiles.txt")):
+            if self.b.status(name) in (S_OK, S_EMPTY):
+                f[key] = len(self.b.lines(name))
+        if installed or f.get("train_jobs") or f.get("kueue"):
+            self.facts["rhoai"] = f
 
     def check_identity_facts(self):
         oauth = self.b.read("07-oauth.yaml") or ""
@@ -2016,7 +2529,10 @@ class Analyzer(object):
         if not pods:
             return
         # -o wide (namespace fixed): NAME READY STATUS RESTARTS AGE IP NODE ...
-        ovn_nodes = {tok[6] for tok in (l.split() for l in pods)
+        # RESTARTS can read "1 (31d ago)": drop the parenthesis, or every
+        # pod that ever restarted shifts its NODE column by two tokens
+        ovn_nodes = {tok[6] for tok in
+                     (re.sub(r"\(\S+ ago\)", "", l).split() for l in pods)
                      if len(tok) >= 7 and tok[0].startswith("ovnkube-node-")}
         node_names = {tok[0] for tok in
                       (l.split() for l in self.b.lines("02-nodes-wide.txt"))
@@ -2508,6 +3024,8 @@ class Analyzer(object):
          "DataProtectionApplication"),
         (r"sriov-network-operator", "03-sriov.txt", "SR-IOV networks"),
         (r"gpu-operator", "12-clusterpolicy.yaml", "GPU ClusterPolicy"),
+        (r"rhods-operator|opendatahub-operator", "13-rhoai-dsc.yaml",
+         "DataScienceCluster"),
         (r"rhacs-operator|advanced-cluster-security", "07-acs-central.txt",
          "ACS Central"),
         (r"compliance-operator", "07-compliance.txt", "compliance scans"),
@@ -2859,7 +3377,7 @@ class Analyzer(object):
         check_routes_hosts, check_nncp, check_whereabouts,
         check_ovnkube_coverage, check_monitoring, check_prom_am,
         check_egress_targets, check_events,
-        check_gpu, check_identity_facts, check_infra_facts,
+        check_gpu, check_rhoai, check_identity_facts, check_infra_facts,
         check_data_availability,
     ]
 
@@ -2947,7 +3465,11 @@ def render_overview(a, bundle_name):
     if gpus:
         L.append("- **GPU nodes**: " +
                  ", ".join("%s (%s GPUs)" % (n, c) for n, c in gpus) +
-                 "; pods consuming GPUs: %s" % f.get("gpu_consumers", "?"))
+                 "; pods consuming GPUs: %s" % f.get("gpu_consumers", "?")
+                 + ("; sharing: %s" % f["gpu_sharing"]
+                    if f.get("gpu_sharing") else "")
+                 + ("; ClusterPolicy: %s" % f["gpu_clusterpolicy_state"]
+                    if f.get("gpu_clusterpolicy_state") else ""))
     L.append("")
     L.append("## Network")
     L.append("")
@@ -2986,6 +3508,27 @@ def render_overview(a, bundle_name):
     if f.get("active_alerts"):
         L.append("- Alerts firing at collection: %s" % f["active_alerts"])
     L.append("")
+    ai = f.get("rhoai")
+    if ai:
+        L.append("## AI / ML platform")
+        L.append("")
+        if "version" in ai:
+            L.append("- OpenShift AI %s (DataScienceCluster phase: %s)"
+                     % (ai["version"], ai["phase"]))
+            L.append("- Managed components: %s"
+                     % (", ".join(ai["managed"]) or "none"))
+        counts = ["%s: %d" % (label, ai[key]) for key, label in (
+            ("workbenches", "workbenches"), ("models", "deployed models"),
+            ("pipeline_servers", "pipeline servers"),
+            ("hardware_profiles", "hardware profiles")) if key in ai]
+        if counts:
+            L.append("- " + " | ".join(counts))
+        if ai.get("train_jobs"):
+            L.append("- Training jobs by state: %s" % ", ".join(
+                "%s=%d" % kv for kv in sorted(ai["train_jobs"].items())))
+        if ai.get("kueue"):
+            L.append("- Kueue: %s" % ai["kueue"])
+        L.append("")
     L.append("## Tenancy & governance")
     L.append("")
     gov = f.get("governance")
@@ -3279,12 +3822,32 @@ GUIDE = [
      ["GPU capacity vs allocatable (mismatch = driver/device-plugin broken).",
       "ClusterPolicy: driver version, MIG strategy vs the mig.config node "
       "labels; DCGM enabled.",
+      "12-gpu-sharing.txt: time-slicing (replicas > 1, product ending in "
+      "-SHARED) and MIG layout - do they match what the users were told a "
+      "'GPU' is?",
+      "Who holds the GPUs (12-gpu-consumers.txt) and for how long; GPU "
+      "nodes without a taint (02-nodes-taints.txt).",
       "NicClusterPolicy + IPoIB/HostDevice networks + SriovNetworkNodeState "
       "for the InfiniBand fabric on DGX.",
       "GPU-consuming pods vs inventory (idle GPUs are expensive); "
       "PerformanceProfile for CPU isolation/hugepages.",
       "NOTE: GPU health (XID errors, nvidia-smi, DCGM diagnostics) is NOT "
       "in the bundle - check DCGM metrics in the console."]),
+    ("13-*.{txt,yaml}", "OpenShift AI / Kueue / training",
+     ["DataScienceCluster: which components are Managed vs what is actually "
+      "used (unused Managed components are attack surface and upgrade "
+      "work); every condition that is False without reason Removed.",
+      "Dashboard access groups (13-rhoai-auth.txt); hardware profiles vs "
+      "the GPU node taints and labels.",
+      "Workbenches: age and GPU use - long-running GPU workbenches block "
+      "training jobs. Is idle culling configured?",
+      "Kueue: which projects have a LocalQueue, ClusterQueue quotas vs real "
+      "GPU capacity, workloads that never get admitted.",
+      "Training jobs: failed ones and their cause; runtimes "
+      "(13-trainingruntimes.txt) vs the images mirrored on a disconnected "
+      "cluster.",
+      "NOTE: known-issue matches are baked in per release - always re-read "
+      "the release notes of the installed OpenShift AI version."]),
 ]
 
 

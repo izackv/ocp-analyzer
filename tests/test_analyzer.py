@@ -6,6 +6,7 @@ All fixtures are synthetic - no customer-derived strings may appear here.
     python3 -m unittest discover tests
 """
 import importlib.util
+import re
 import sys
 import tempfile
 import unittest
@@ -966,6 +967,483 @@ class TestCrossRunDiff(unittest.TestCase):
             self.assertIn("Resolved", issues)
             self.assertIn("kubeadmin", issues)
             self.assertIn("New", issues)
+
+
+GPU_CAPACITY = """NAME     GPU-CAP   GPU-ALLOC   HUGEPG-2M   HUGEPG-1G
+gpu-a    2         2           0           0
+gpu-b    4         4           0           0
+cpu-a    <none>    <none>      0           0
+"""
+GPU_CLUSTERPOLICY = """apiVersion: v1
+items:
+- apiVersion: nvidia.com/v1
+  kind: ClusterPolicy
+  metadata:
+    name: gpu-cluster-policy
+  spec:
+    mig:
+      strategy: single
+  status:
+    namespace: nvidia-gpu-operator
+    state: %s
+kind: List
+"""
+GPU_TAINTED = """NAME    TAINT-KEYS       TAINT-EFFECTS
+gpu-a   nvidia.com/gpu   NoSchedule
+gpu-b   nvidia.com/gpu   NoSchedule
+cpu-a   <none>           <none>
+"""
+
+
+def gpu_files(**over):
+    files = {"12-gpu-capacity.txt": GPU_CAPACITY,
+             "12-clusterpolicy.yaml": GPU_CLUSTERPOLICY % "ready",
+             "02-nodes-taints.txt": GPU_TAINTED,
+             "12-gpu-consumers.txt":
+                 "NS     NAME    NODE    GPU-LIMITS\n"
+                 "team   job-1   gpu-a   1\n"}
+    files.update(over)
+    return files
+
+
+class TestGpuChecks(unittest.TestCase):
+    def run_gpu(self, t, **over):
+        a = analyzer(t, gpu_files(**over))
+        a._check = "check_gpu"
+        a.check_gpu()
+        return a
+
+    def test_healthy_gpu_cluster_is_quiet(self):
+        with tempfile.TemporaryDirectory() as t:
+            a = self.run_gpu(t)
+            self.assertEqual(titles(a), [])
+            self.assertIn(("GPU", "GPU Operator ClusterPolicy state is ready"),
+                          a.greens)
+
+    def test_allocatable_below_capacity(self):
+        with tempfile.TemporaryDirectory() as t:
+            a = self.run_gpu(t, **{"12-gpu-capacity.txt":
+                                   GPU_CAPACITY.replace("4         4", "4         3")})
+            hit = [f for f in a.findings if "fewer GPUs" in f["title"]]
+            self.assertEqual(len(hit), 1)
+            self.assertEqual(hit[0]["sev"], "HIGH")
+            self.assertIn("gpu-b (3 of 4)", hit[0]["evidence"])
+
+    def test_clusterpolicy_not_ready(self):
+        with tempfile.TemporaryDirectory() as t:
+            a = self.run_gpu(t, **{"12-clusterpolicy.yaml":
+                                   GPU_CLUSTERPOLICY % "notReady"})
+            self.assertIn("GPU Operator ClusterPolicy state is 'notReady'",
+                          titles(a))
+
+    def test_kyverno_clusterpolicy_is_not_mistaken_for_nvidia(self):
+        """Old collectors used the bare name `clusterpolicy`, which returns
+        Kyverno objects where Kyverno is installed."""
+        with tempfile.TemporaryDirectory() as t:
+            a = self.run_gpu(t, **{"12-clusterpolicy.yaml":
+                                   "items:\n- apiVersion: kyverno.io/v1\n"
+                                   "  kind: ClusterPolicy\n  status:\n"
+                                   "    ready: true\n"})
+            self.assertEqual(titles(a), [])
+            self.assertTrue(any("Kyverno" in x for x in a.assumptions))
+
+    def test_time_slicing_detected(self):
+        sharing = ("NAME    PRODUCT            GPU-MEM-MIB   REPLICAS   SHARING        MIG-CAPABLE   MIG-CONFIG     MIG-STRATEGY   DRIVER\n"
+                   "gpu-a   Tesla-T4-SHARED    15360         4          time-slicing   false         <none>         single         550.1\n"
+                   "gpu-b   NVIDIA-A100        40960         1          none           true          all-disabled   single         550.1\n")
+        with tempfile.TemporaryDirectory() as t:
+            a = self.run_gpu(t, **{"12-gpu-sharing.txt": sharing})
+            hit = [f for f in a.findings if "time-slicing" in f["title"]]
+            self.assertEqual(len(hit), 1)
+            self.assertIn("gpu-a", hit[0]["evidence"])
+            self.assertNotIn("gpu-b", hit[0]["evidence"])
+            self.assertEqual(a.facts["gpu_sharing"], "time-slicing on 1 node(s)")
+
+    def test_untainted_gpu_node_lists_non_gpu_pods(self):
+        with tempfile.TemporaryDirectory() as t:
+            a = self.run_gpu(t, **{
+                "02-nodes-taints.txt": GPU_TAINTED.replace(
+                    "gpu-b   nvidia.com/gpu   NoSchedule",
+                    "gpu-b   <none>           <none>"),
+                "12-gpu-consumers.txt":
+                    "NS                    NAME       NODE    GPU-LIMITS\n"
+                    "team                  job-1      gpu-a   1\n"
+                    "shop                  web-1      gpu-b   <none>\n"
+                    "openshift-dns         dns-x      gpu-b   <none>\n"
+                    "nvidia-gpu-operator   driver-x   gpu-b   <none>\n"})
+            hit = [f for f in a.findings if "no taint" in f["title"]]
+            self.assertEqual(len(hit), 1)
+            self.assertIn("gpu-b", hit[0]["evidence"])
+            self.assertIn("shop/web-1", hit[0]["evidence"])
+            self.assertNotIn("dns-x", hit[0]["evidence"])
+            self.assertNotIn("driver-x", hit[0]["evidence"])
+
+    def test_taint_keys_fall_back_to_conditions_file(self):
+        """Bundles from older collectors have taint keys only."""
+        cond = ("NAME    READY   MEM-PRESSURE   DISK-PRESSURE   PID-PRESSURE   NET-UNAVAIL   TAINTS\n"
+                "gpu-a   True    False          False           False          <none>        nvidia.com/gpu\n"
+                "gpu-b   True    False          False           False          <none>        <none>\n")
+        with tempfile.TemporaryDirectory() as t:
+            files = gpu_files(**{"02-nodes-conditions.txt": cond})
+            del files["02-nodes-taints.txt"]
+            a = analyzer(t, files)
+            a.check_gpu()
+            hit = [f for f in a.findings if "no taint" in f["title"]]
+            self.assertEqual(len(hit), 1)
+            self.assertIn("gpu-b", hit[0]["evidence"])
+            self.assertNotIn("gpu-a", hit[0]["evidence"])
+
+    def test_all_gpus_held_and_workbench_named(self):
+        pods = ("NAMESPACE   NAME       READY   STATUS      RESTARTS       AGE   IP         NODE\n"
+                "team        wb-0       2/2     Running     3 (2d ago)     12d   10.0.0.1   gpu-a\n"
+                "team        job-1      1/1     Running     0              1h    10.0.0.2   gpu-b\n"
+                "team        old-job    0/1     Completed   0              30d   10.0.0.3   gpu-b\n")
+        cons = ("NS     NAME      NODE    GPU-LIMITS\n"
+                "team   wb-0      gpu-a   2\n"
+                "team   job-1     gpu-b   4\n"
+                "team   old-job   gpu-b   4\n")
+        with tempfile.TemporaryDirectory() as t:
+            a = self.run_gpu(t, **{
+                "06-pods-all.txt": pods, "12-gpu-consumers.txt": cons,
+                "13-rhoai-notebooks.txt": "NAMESPACE   NAME   AGE\nteam        wb     12d\n"})
+            hit = [f for f in a.findings if "are in use" in f["title"]]
+            self.assertEqual(len(hit), 1)
+            self.assertEqual(hit[0]["sev"], "LOW")
+            self.assertIn("team/wb-0 (2 GPU, age 12d, workbench)",
+                          hit[0]["evidence"])
+            self.assertNotIn("old-job", hit[0]["evidence"])   # Completed
+
+    def test_completed_pods_do_not_count_as_holding(self):
+        pods = ("NAMESPACE   NAME      READY   STATUS      RESTARTS   AGE   IP         NODE\n"
+                "team        old-a     0/1     Completed   0          3d    10.0.0.3   gpu-a\n"
+                "team        old-b     0/1     Completed   0          3d    10.0.0.4   gpu-b\n")
+        cons = ("NS     NAME    NODE    GPU-LIMITS\n"
+                "team   old-a   gpu-a   2\n"
+                "team   old-b   gpu-b   4\n")
+        with tempfile.TemporaryDirectory() as t:
+            a = self.run_gpu(t, **{"06-pods-all.txt": pods,
+                                   "12-gpu-consumers.txt": cons})
+            self.assertFalse([x for x in titles(a) if "are in use" in x])
+
+    def test_dcgm_servicemonitor_missing(self):
+        with tempfile.TemporaryDirectory() as t:
+            a = self.run_gpu(t, **{"12-gpu-servicemonitors.txt":
+                                   "NAME           AGE\ngpu-operator   9d\n"})
+            self.assertIn("GPU metrics (DCGM) are not scraped by cluster "
+                          "monitoring", titles(a))
+        with tempfile.TemporaryDirectory() as t:
+            a = self.run_gpu(t, **{"12-gpu-servicemonitors.txt":
+                                   "NAME                   AGE\n"
+                                   "nvidia-dcgm-exporter   9d\n"})
+            self.assertEqual(titles(a), [])
+
+
+DSC_YAML = """apiVersion: v1
+items:
+- apiVersion: datasciencecluster.opendatahub.io/v2
+  kind: DataScienceCluster
+  metadata:
+    name: default-dsc
+  spec:
+    components:
+      kserve:
+        managementState: Managed
+        nim:
+          managementState: Removed
+      kueue:
+        defaultClusterQueueName: default
+        managementState: Unmanaged
+      llamastackoperator:
+        managementState: Removed
+      trainer:
+        managementState: Managed
+      workbenches:
+        managementState: Managed
+  status:
+    components:
+      kserve:
+        managementState: Managed
+        releases:
+        - name: KServe
+          version: v0.19.0
+        - name: platform
+          version: 3.5.3
+      llamastackoperator: {}
+      trainer:
+        managementState: Managed
+        releases:
+        - name: Kubeflow Trainer
+          repoUrl: https://example.test/trainer
+          version: 2.1.0
+      workbenches:
+        managementState: Managed
+        releases:
+        - name: Notebook Controller
+          version: 1.10.0
+        - name: platform
+          version: %(wb)s
+    conditions:
+    - lastTransitionTime: "2026-11-01T00:00:00Z"
+      status: "True"
+      type: Ready
+    - lastTransitionTime: "2026-11-01T00:00:00Z"
+      message: Component ManagementState is set to Removed
+      reason: Removed
+      severity: Info
+      status: "False"
+      type: SparkOperatorReady
+%(extra)s    observedGeneration: 3
+    phase: %(phase)s
+    release:
+      name: OpenShift AI Self-Managed
+      version: 3.5.3
+kind: List
+"""
+CSV_AI = ("NAMESPACE   NAME                     DISPLAY   VERSION   REPLACES   PHASE\n"
+          "ods         rhods-operator.3.5.3     x         3.5.3     y          Succeeded\n"
+          "jobset      jobset-operator.v1.0.1   x         1.0.1     y          Succeeded\n"
+          "kueue       kueue-operator.v%s       x         1         y          Succeeded\n")
+
+
+def dsc(wb="3.5.3", phase="Ready", extra=""):
+    return DSC_YAML % {"wb": wb, "phase": phase, "extra": extra}
+
+
+class TestRhoaiChecks(unittest.TestCase):
+    def run_ai(self, t, files):
+        a = analyzer(t, files)
+        a._check = "check_rhoai"
+        a.check_rhoai()
+        return a
+
+    def test_component_parsers(self):
+        comps = oa.dsc_components(oa.yaml_block(
+            oa.yaml_block(dsc(), "spec"), "components"))
+        self.assertEqual(comps, {"kserve": "Managed", "kueue": "Unmanaged",
+                                 "llamastackoperator": "Removed",
+                                 "trainer": "Managed",
+                                 "workbenches": "Managed"})
+        vers = oa.dsc_platform_versions(oa.yaml_block(
+            oa.yaml_block(dsc(wb="3.5.1"), "status"), "components"))
+        self.assertEqual(vers, {"kserve": "3.5.3", "workbenches": "3.5.1"})
+
+    def test_healthy_dsc_is_green_and_feeds_overview(self):
+        with tempfile.TemporaryDirectory() as t:
+            a = self.run_ai(t, {"13-rhoai-dsc.yaml": dsc(),
+                                "05-csv.txt": CSV_AI % "1.3.2",
+                                "13-rhoai-notebooks.txt":
+                                    "NAMESPACE   NAME   AGE\nteam   wb   1d\n"})
+            self.assertEqual(titles(a), [])
+            self.assertTrue(any(area == "AI platform" for area, _ in a.greens))
+            ai = a.facts["rhoai"]
+            self.assertEqual(ai["version"], "3.5.3")
+            self.assertEqual(ai["managed"], ["kserve", "trainer", "workbenches"])
+            self.assertEqual(ai["workbenches"], 1)
+            self.assertIn("## AI / ML platform",
+                          oa.render_overview(a, "bundle"))
+
+    def test_removed_components_are_not_failures_but_real_ones_are(self):
+        extra = ("    - lastTransitionTime: \"2026-11-01T00:00:00Z\"\n"
+                 "      message: deployment not available\n"
+                 "      reason: DeploymentsNotReady\n"
+                 "      status: \"False\"\n"
+                 "      type: KserveReady\n")
+        with tempfile.TemporaryDirectory() as t:
+            a = self.run_ai(t, {"13-rhoai-dsc.yaml":
+                                dsc(phase="Not Ready", extra=extra)})
+            hit = [f for f in a.findings if "not fully healthy" in f["title"]]
+            self.assertEqual(len(hit), 1)
+            self.assertEqual(hit[0]["sev"], "HIGH")
+            self.assertIn("KserveReady", hit[0]["evidence"])
+            self.assertNotIn("SparkOperatorReady", hit[0]["evidence"])
+
+    def test_component_behind_release(self):
+        with tempfile.TemporaryDirectory() as t:
+            a = self.run_ai(t, {"13-rhoai-dsc.yaml": dsc(wb="3.5.1")})
+            hit = [f for f in a.findings if "older platform version" in f["title"]]
+            self.assertEqual(len(hit), 1)
+            self.assertIn("workbenches=3.5.1", hit[0]["evidence"])
+
+    def test_missing_dependency_operator(self):
+        with tempfile.TemporaryDirectory() as t:
+            csv = "\n".join(l for l in (CSV_AI % "1.3.2").splitlines()
+                            if "jobset" not in l) + "\n"
+            a = self.run_ai(t, {"13-rhoai-dsc.yaml": dsc(), "05-csv.txt": csv})
+            self.assertTrue([x for x in titles(a)
+                             if "`trainer` is Managed but the JobSet" in x])
+        with tempfile.TemporaryDirectory() as t:     # no CSV data: stay silent
+            a = self.run_ai(t, {"13-rhoai-dsc.yaml": dsc()})
+            self.assertEqual(titles(a), [])
+
+    def test_known_issues_are_version_gated(self):
+        hw = "NAMESPACE   NAME     AGE\nods         gpu-1x   2d\n"
+        with tempfile.TemporaryDirectory() as t:
+            a = self.run_ai(t, {"13-rhoai-dsc.yaml": dsc(),
+                                "05-csv.txt": CSV_AI % "1.4.0",
+                                "13-rhoai-hardwareprofiles.txt": hw})
+            got = " ".join(titles(a))
+            self.assertIn("RHOAIENG-87625", got)
+            self.assertIn("RHOAIENG-67403", got)
+        with tempfile.TemporaryDirectory() as t:     # Kueue 1.3: only one hits
+            a = self.run_ai(t, {"13-rhoai-dsc.yaml": dsc(),
+                                "05-csv.txt": CSV_AI % "1.3.2",
+                                "13-rhoai-hardwareprofiles.txt": hw})
+            got = " ".join(titles(a))
+            self.assertNotIn("RHOAIENG-87625", got)
+            self.assertIn("RHOAIENG-67403", got)
+        with tempfile.TemporaryDirectory() as t:     # other release: silent
+            a = self.run_ai(t, {"13-rhoai-dsc.yaml":
+                                dsc().replace("3.5.3", "3.6.0"),
+                                "05-csv.txt": CSV_AI % "1.4.0",
+                                "13-rhoai-hardwareprofiles.txt": hw})
+            self.assertNotIn("known issue", " ".join(titles(a)))
+
+    def test_failed_trainjobs_and_pending_kueue_workloads(self):
+        with tempfile.TemporaryDirectory() as t:
+            a = self.run_ai(t, {
+                "13-trainjobs.txt":
+                    "NAMESPACE   NAME    STATE      AGE\n"
+                    "team        run-1   Complete   9d\n"
+                    "team        run-2   Failed     3d\n"
+                    "team        run-3              5m\n",
+                "13-kueue-clusterqueues.txt":
+                    "NAME      COHORT   PENDING WORKLOADS\ndefault            2\n",
+                "13-kueue-localqueues.txt":
+                    "NAMESPACE   NAME      CLUSTERQUEUE   PENDING WORKLOADS   ADMITTED WORKLOADS\n"
+                    "team        default   default        2                   1\n",
+                "13-kueue-workloads.txt":
+                    "NAMESPACE   NAME           QUEUE     RESERVED IN   ADMITTED   FINISHED   AGE\n"
+                    "team        trainjob-a     default   default       True       True       9d\n"
+                    "team        trainjob-b     default                                       5m\n"
+                    "team        trainjob-c     default                                       4m\n"})
+            self.assertIn("1 failed training job(s)", titles(a))
+            hit = [f for f in a.findings if "waiting in Kueue" in f["title"]]
+            self.assertEqual(len(hit), 1)
+            self.assertIn("team/trainjob-b", hit[0]["evidence"])
+            self.assertNotIn("trainjob-a", hit[0]["evidence"])
+            self.assertEqual(a.facts["rhoai"]["train_jobs"],
+                             {"Complete": 1, "Failed": 1, "(no state)": 1})
+
+    def test_dashboard_open_to_all_authenticated_users(self):
+        with tempfile.TemporaryDirectory() as t:
+            a = self.run_ai(t, {"13-rhoai-auth.txt":
+                                "NAME   ADMIN-GROUPS   ALLOWED-GROUPS\n"
+                                "auth   ai-admins      system:authenticated\n"})
+            self.assertIn("Every authenticated user can use the OpenShift AI "
+                          "dashboard", titles(a))
+
+    def test_cluster_without_openshift_ai_stays_silent(self):
+        with tempfile.TemporaryDirectory() as t:
+            b = make_bundle(t, {"01-version.txt": "Server Version: 4.18.35\n"})
+            (b / "13-rhoai-dsc.yaml").write_text(
+                "(command failed or resource absent - see .err)\n")
+            (b / "13-rhoai-dsc.yaml.err").write_text(
+                "error: the server doesn't have a resource type "
+                "\"datascienceclusters\"\n")
+            a = oa.Analyzer(oa.Bundle(b))
+            a.check_rhoai()
+            self.assertEqual(titles(a), [])
+            self.assertNotIn("rhoai", a.facts)
+
+    def test_operator_installed_without_datasciencecluster_is_idle(self):
+        with tempfile.TemporaryDirectory() as t:
+            a = analyzer(t, {"05-csv.txt": CSV_AI % "1.3.2",
+                             "13-rhoai-dsc.yaml": "(empty result)\n"})
+            a.check_idle_operators()
+            self.assertTrue(any("rhods-operator" in f["evidence"]
+                                for f in a.findings))
+
+
+class TestActiveAlerts(unittest.TestCase):
+    ALERTS = ('[{"labels": {"alertname": "EtcdDown", "severity": "critical"}},'
+              ' {"labels": {"alertname": "Slow", "severity": "warning"}}]')
+
+    def test_collected_alerts_are_reported(self):
+        with tempfile.TemporaryDirectory() as t:
+            a = analyzer(t, {"08-active-alerts.json": self.ALERTS})
+            a.check_monitoring()
+            self.assertIn("1 critical alert(s) firing at collection time",
+                          titles(a))
+            self.assertEqual(a.facts["active_alerts"],
+                             {"critical": 1, "warning": 1})
+            self.assertFalse(any("NOT collected" in x for x in a.assumptions))
+
+    def test_not_requested_is_declared_unknown(self):
+        with tempfile.TemporaryDirectory() as t:
+            a = analyzer(t, {"01-version.txt": "Server Version: 4.18.35\n"})
+            a.check_monitoring()
+            self.assertTrue(any("NOT collected" in x for x in a.assumptions))
+            self.assertNotIn("active_alerts", a.facts)
+
+
+class TestOvnkubeCoverage(unittest.TestCase):
+    NODES = ("NAME    STATUS   ROLES    AGE   VERSION\n"
+             "node-a  Ready    worker   9d    v1.33.1\n"
+             "node-b  Ready    worker   9d    v1.33.1\n")
+
+    def test_restarted_pods_still_count(self):
+        """`1 (31d ago)` in RESTARTS must not shift the NODE column."""
+        pods = ("NAME               READY   STATUS    RESTARTS      AGE   IP         NODE     NOMINATED NODE   READINESS GATES\n"
+                "ovnkube-node-aaa   8/8     Running   0             9d    10.0.0.1   node-a   <none>           <none>\n"
+                "ovnkube-node-bbb   8/8     Running   1 (31d ago)   9d    10.0.0.2   node-b   <none>           <none>\n")
+        with tempfile.TemporaryDirectory() as t:
+            a = analyzer(t, {"02-nodes-wide.txt": self.NODES,
+                             "03-ovnkube-pods.txt": pods})
+            a.check_ovnkube_coverage()
+            self.assertEqual(titles(a), [])
+
+    def test_missing_pod_is_reported(self):
+        pods = ("NAME               READY   STATUS    RESTARTS   AGE   IP         NODE\n"
+                "ovnkube-node-aaa   8/8     Running   0          9d    10.0.0.1   node-a\n")
+        with tempfile.TemporaryDirectory() as t:
+            a = analyzer(t, {"02-nodes-wide.txt": self.NODES,
+                             "03-ovnkube-pods.txt": pods})
+            a.check_ovnkube_coverage()
+            self.assertEqual(titles(a), ["1 node(s) without an ovnkube-node pod"])
+
+
+class TestCollectorScript(unittest.TestCase):
+    """Static checks on collect-ocp-review.sh (no cluster needed)."""
+
+    SCRIPT = (REPO / "collect-ocp-review.sh").read_text()
+
+    def collected(self):
+        return dict(re.findall(r'^run "([^"]+)"\s+(.*)$', self.SCRIPT, re.M))
+
+    def test_only_read_verbs(self):
+        for name, args in self.collected().items():
+            self.assertRegex(args, r"^(get|version|adm (top|upgrade))\b",
+                             "%s runs a non-read command" % name)
+
+    def test_alerts_are_opt_in_and_token_stays_off_the_command_line(self):
+        self.assertNotIn("services/alertmanager-main", self.SCRIPT)
+        self.assertIn('if [ "$ALERTS" != 0 ]; then collect_alerts; fi',
+                      self.SCRIPT)
+        curl = [l for l in self.SCRIPT.splitlines()
+                if l.strip().startswith("curl ")]
+        self.assertEqual(len(curl), 1)
+        self.assertIn("-K -", curl[0])
+        self.assertNotIn("$token", curl[0])
+        self.assertNotIn("-X", curl[0])            # plain GET only
+
+    def test_every_call_has_a_request_timeout(self):
+        self.assertIn('oc --request-timeout="$REQUEST_TIMEOUT" "$@"',
+                      self.SCRIPT)
+
+    def test_collision_prone_resources_are_fully_qualified(self):
+        c = self.collected()
+        for name in ("12-clusterpolicy.yaml", "10-velero-crs.txt",
+                     "07-acs-central.txt", "03-whereabouts-ippools.yaml"):
+            self.assertRegex(c[name], r"^get [a-z]+\.[a-z0-9.-]+",
+                             "%s uses a bare resource name" % name)
+        for name, args in c.items():
+            if name.startswith("13-"):
+                self.assertRegex(args, r"^get [a-z]+\.[a-z0-9.-]+\.[a-z]+",
+                                 "%s uses a bare resource name" % name)
+
+    def test_every_collected_file_has_an_evidence_command(self):
+        missing = [n for n in self.collected() if n not in oa.FILE_COMMANDS]
+        self.assertEqual(missing, [])
 
 
 class TestFullRunSmoke(unittest.TestCase):

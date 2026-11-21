@@ -13,6 +13,8 @@ What gets replaced (consistently across all files):
   * the cluster name label (also inside infrastructureName, account names...)
   * node hostnames                              -> master01/worker01/infra01...
   * OpenShift usernames (from 07-users.txt)     -> user0001, user0002, ...
+    (also in the form OpenShift AI embeds in workbench names,
+    e.g. jupyter-nb-john-2esmith for john.smith)
   * every IPv4 address                          -> stable fake (TEST-NET ranges)
   * every UUID/GUID (cluster ID, identities...) -> stable fake UUIDs
   * e-mail addresses                            -> userNNNN@example.com
@@ -154,6 +156,16 @@ def detect_usernames(bundle: Path):
     return users
 
 
+def rhoai_encoded(user: str):
+    """A username as OpenShift AI writes it into resource names (workbench
+    `jupyter-nb-<user>`, its pod, PVC, route and Kueue workload): lower-cased,
+    every character outside [a-z0-9] replaced by `-` + its hex code.
+    Returns None when the name needs no encoding."""
+    low = user.lower()
+    enc = "".join(c if re.match(r"[a-z0-9]", c) else "-%02x" % ord(c) for c in low)
+    return enc if enc != low else None
+
+
 def detect_nodes(bundle: Path):
     """Map node short hostnames -> roleNN, using any nodes listing present."""
     mapping = {}
@@ -258,6 +270,9 @@ def main():
     users = [u for u in detect_usernames(bundle) if len(u) > 2]
     for i, user in enumerate(users, 1):
         bounded[user.lower()] = f"user{i:04d}"
+        enc = rhoai_encoded(user)
+        if enc and len(enc) > 2:
+            bounded[enc] = f"user{i:04d}"
     node_map = detect_nodes(bundle)
     for short, repl in node_map.items():
         bounded[short.lower()] = repl

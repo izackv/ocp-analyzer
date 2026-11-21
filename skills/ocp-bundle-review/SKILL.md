@@ -136,6 +136,21 @@ Work through ALL of these; each cites the file to check.
 - GPU capacity vs allocatable mismatch; ClusterPolicy driver/MIG config vs
   node labels; NicClusterPolicy/IPoIB for InfiniBand; idle GPUs (no
   consumers); PerformanceProfile. GPU *health* is not in the bundle — say so.
+- `12-gpu-sharing.txt`: time-slicing (replicas > 1, product ending in
+  `-SHARED`) and MIG layout; `02-nodes-taints.txt`: GPU nodes without a
+  NoSchedule taint; who holds the GPUs and for how long (long-running GPU
+  workbenches block training jobs).
+
+**OpenShift AI / Kueue / training (if `13-*` files present)**
+- `13-rhoai-dsc.yaml`: DataScienceCluster phase, components Managed vs
+  actually used, every condition that is False without reason `Removed`,
+  components reporting an older platform version than the release.
+- Dashboard access groups (`13-rhoai-auth.txt`); hardware profiles vs GPU
+  node taints; workbenches, deployed models, pipeline servers.
+- Kueue: queue-managed projects, quotas vs real GPU capacity, workloads
+  never admitted. Training jobs: failed ones and their cause.
+- Check the installed version's release notes (known issues) online — the
+  analyzer's known-issue matches are a baked-in snapshot.
 
 ## Deliverables
 

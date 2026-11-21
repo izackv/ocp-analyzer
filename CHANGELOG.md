@@ -2,6 +2,41 @@
 
 All notable changes to this toolkit are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [Unreleased]
+
+### Added
+
+- OpenShift AI / Kueue / training coverage: new collector section 13
+  (DataScienceCluster, dashboard access, hardware profiles, workbenches,
+  models, pipeline servers, Kueue queues and workloads, TrainJobs) and
+  analyzer checks for platform health, component version drift, missing
+  dependency operators, failed training jobs, waiting Kueue workloads and
+  release-gated known issues; the overview gains an "AI / ML platform"
+  section.
+- Deeper GPU analysis: allocatable below capacity, ClusterPolicy state,
+  time-slicing/MIG, GPU nodes without a taint, all GPUs held (workbenches
+  named), GPU metrics not scraped.
+- Sanitizer: usernames are also replaced in the hex-escaped form
+  OpenShift AI embeds in workbench, pod and Kueue workload names.
+
+### Fixed
+
+- Firing-alerts snapshot: the old collection line could never authenticate
+  (the API server drops the caller's token when proxying to a service) and
+  failed on every cluster. It is replaced by an opt-in `--alerts` flag that
+  reads the Alertmanager route with the session token; without the flag the
+  analyzer declares the alert state unknown instead of reporting a failure.
+- Analyzer: nodes whose OVN pod had ever restarted were reported as having
+  no ovnkube-node pod (column shift on `1 (31d ago)`).
+
+### Changed
+
+- Collector hardening: every `oc` call carries a request timeout
+  (`OCP_REVIEW_TIMEOUT`, default 120s), and collision-prone resources are
+  fully qualified (e.g. `clusterpolicies.nvidia.com`, which a bare
+  `clusterpolicy` resolves to Kyverno where Kyverno is installed; Velero,
+  ACS, Whereabouts, NFD likewise).
+
 ## [2026.07.1] - 2026-07-18
 
 Major capability/accuracy release: the analyzer was rebuilt around a gap

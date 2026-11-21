@@ -9,6 +9,13 @@
 #   oc get / oc adm top / oc auth can-i / oc whoami / oc version /
 #   oc adm upgrade (no args) / oc get --raw <GET endpoints>
 # It performs NO writes and does NOT exec into pods.
+# Every call carries a request timeout (default 120s, override with
+# OCP_REVIEW_TIMEOUT=300s) so one hung API request cannot block the run.
+#
+# One opt-in exception to "oc only": --alerts saves the alerts firing right
+# now. Alertmanager cannot be read through oc, so this sends ONE read-only
+# HTTPS GET with curl to the cluster's own alertmanager-main route, with the
+# token of your oc session. Off unless you ask for it.
 #
 # Data sensitivity:
 #   This script does NOT read Secret or ConfigMap *data*. It does capture:
@@ -23,7 +30,11 @@
 #
 # Usage:
 #   export KUBECONFIG=/path/to/cluster-kubeconfig
-#   ./collect-ocp-review.sh [--sanitize] [cluster-label]
+#   ./collect-ocp-review.sh [--sanitize] [--alerts] [cluster-label]
+#   --alerts            also save the firing alerts (see the note above)
+#   --alerts-insecure   same, without checking the route's TLS certificate
+#                       (for clusters whose ingress CA this machine does not
+#                       trust; your token is then sent to an unverified host)
 #
 set -uo pipefail
 
@@ -33,13 +44,19 @@ set -uo pipefail
 TOOLKIT_VERSION="2026.07.1"
 BUNDLE_FORMAT=2
 
+REQUEST_TIMEOUT="${OCP_REVIEW_TIMEOUT:-120s}"
+
 SANITIZE=0
+ALERTS=0            # 0 = off, 1 = verify TLS, 2 = skip TLS verification
 CLUSTER_LABEL=""
 for arg in "$@"; do
   case "$arg" in
     -s|--sanitize) SANITIZE=1 ;;
+    --alerts) ALERTS=1 ;;
+    --alerts-insecure) ALERTS=2 ;;
     -h|--help)
-      sed -n '2,25p' "$0"; exit 0 ;;
+      sed -n '2,38p' "$0"; exit 0 ;;
+    -*) echo "unknown option: $arg (see --help)" >&2; exit 2 ;;
     *) CLUSTER_LABEL="$arg" ;;
   esac
 done
@@ -56,19 +73,49 @@ mkdir -p "$OUT"
   echo "bundle-format: $BUNDLE_FORMAT"
   echo "collected: $TS"
   echo "cluster-label: $CLUSTER_LABEL"
+  echo "alerts: $([ "$ALERTS" = 0 ] && echo not-requested || echo requested)"
 } > "$OUT/00-meta.txt"
 
 log()  { printf '  [+] %s\n' "$1"; }
 warn() { printf '  [!] %s\n' "$1" >&2; }
 
-# run <outfile> <oc args...>  — never fails the script; records missing/denied
+# run <outfile> <oc args...>  — never fails the script; records missing/denied.
+# The request timeout is a default: a --request-timeout among the arguments
+# comes later on the command line and wins.
 run() {
-  local f="$OUT/$1"; shift
-  if oc "$@" > "$f" 2>"$f.err"; then
+  local name="$1" f="$OUT/$1"; shift
+  if oc --request-timeout="$REQUEST_TIMEOUT" "$@" > "$f" 2>"$f.err"; then
     [ -s "$f" ] || echo "(empty result)" > "$f"
     rm -f "$f.err"
   else
-    echo "(command failed or resource absent — see $1.err)" > "$f"
+    echo "(command failed or resource absent — see $name.err)" > "$f"
+  fi
+}
+
+# Firing alerts (opt-in, see the header). Alertmanager sits behind an
+# authenticating proxy, and the API server removes the caller's token before
+# it proxies a request to a service, so "oc get --raw .../services/.../proxy"
+# can never authenticate there. The supported way is the route plus a token.
+# The token goes to curl on stdin (-K -), never on the command line.
+collect_alerts() {
+  local name="08-active-alerts.json" f host token rc insecure=""
+  f="$OUT/$name"
+  fail() { echo "$1" > "$f.err"; echo "(command failed or resource absent — see $name.err)" > "$f"; }
+  command -v curl >/dev/null 2>&1 || { fail "error: curl is missing on this machine"; return; }
+  host="$(oc --request-timeout="$REQUEST_TIMEOUT" get route alertmanager-main -n openshift-monitoring -o 'jsonpath={.spec.host}' 2>"$f.err")"
+  [ -n "$host" ] || { fail "error: cannot read the alertmanager-main route: $(cat "$f.err")"; return; }
+  token="$(oc whoami -t 2>/dev/null)"
+  [ -n "$token" ] || { fail "error: this oc session has no token (certificate login); log in with a token to collect alerts"; return; }
+  [ "$ALERTS" = 2 ] && insecure="--insecure"
+  printf 'header = "Authorization: Bearer %s"\n' "$token" |
+    curl -sS --fail --max-time 60 $insecure -K - -o "$f" "https://$host/api/v2/alerts?active=true" 2>"$f.err"
+  rc=$?
+  if [ "$rc" = 60 ]; then
+    fail "error: the TLS certificate of $host is unknown to this machine; re-run with --alerts-insecure, or add the ingress CA to the system trust store"
+  elif [ "$rc" != 0 ] || [ "$(head -c 1 "$f" 2>/dev/null)" != "[" ]; then
+    fail "error: request to https://$host/api/v2/alerts failed (curl exit $rc): $(cat "$f.err")"
+  else
+    rm -f "$f.err"
   fi
 }
 
@@ -120,6 +167,7 @@ run "02-nodes-roles-zones.txt"  get nodes -L node-role.kubernetes.io/master -L n
 run "02-nodes-capacity.txt"     get nodes -o custom-columns=NAME:.metadata.name,CPU:.status.capacity.cpu,MEM:.status.capacity.memory,ALLOC-CPU:.status.allocatable.cpu,ALLOC-MEM:.status.allocatable.memory,KERNEL:.status.nodeInfo.kernelVersion,RUNTIME:.status.nodeInfo.containerRuntimeVersion
 # quoted because the jsonpath condition filters contain shell metacharacters ( ) *
 run "02-nodes-conditions.txt"   get nodes -o "custom-columns=NAME:.metadata.name,READY:.status.conditions[?(@.type=='Ready')].status,MEM-PRESSURE:.status.conditions[?(@.type=='MemoryPressure')].status,DISK-PRESSURE:.status.conditions[?(@.type=='DiskPressure')].status,PID-PRESSURE:.status.conditions[?(@.type=='PIDPressure')].status,NET-UNAVAIL:.status.conditions[?(@.type=='NetworkUnavailable')].status,TAINTS:.spec.taints[*].key"
+run "02-nodes-taints.txt"       get nodes -o "custom-columns=NAME:.metadata.name,TAINT-KEYS:.spec.taints[*].key,TAINT-EFFECTS:.spec.taints[*].effect"   # dedicated (e.g. GPU) nodes should carry a NoSchedule taint
 run "02-mcp.txt"                get machineconfigpool
 run "02-machineconfigs.txt"     get machineconfig                        # names reveal overlapping custom MCs
 run "02-kubeletconfig.yaml"     get kubeletconfig -o yaml                # systemReserved etc.
@@ -148,8 +196,8 @@ run "03-net-attach-def.txt"     get network-attachment-definitions -A
 run "03-sriov.txt"              get sriovnetworknodepolicy,sriovnetwork -A
 run "03-nncp.yaml"              get nncp -o yaml                         # NodeNetworkConfigurationPolicy status (nmstate)
 run "03-nnce.txt"               get nnce                                 # per-node enactment of the NNCPs above
-run "03-whereabouts-ippools.yaml" get ippools -A -o yaml                # Whereabouts IPAM pools: allocations, podrefs (duplicate/orphan IP detection)
-run "03-whereabouts-overlap.txt"  get overlappingrangeipreservations -A
+run "03-whereabouts-ippools.yaml" get ippools.whereabouts.cni.cncf.io -A -o yaml                # Whereabouts IPAM pools: allocations, podrefs (duplicate/orphan IP detection)
+run "03-whereabouts-overlap.txt"  get overlappingrangeipreservations.whereabouts.cni.cncf.io -A
 run "03-ovnkube-pods.txt"       get pods -n openshift-ovn-kubernetes -o wide   # expect one ovnkube-node pod per node
 
 # ---- 4. Storage -------------------------------------------------------------
@@ -217,8 +265,8 @@ run "07-kubeadmin-exists.txt"   get secret kubeadmin -n kube-system -o name
 run "07-imageregistry.yaml"     get configs.imageregistry.operator.openshift.io cluster -o yaml
 run "07-registry-route.txt"     get route -n openshift-image-registry
 run "07-certificates.txt"       get certificates.cert-manager.io -A
-run "07-acs-central.txt"        get central -A
-run "07-acs-secured.txt"        get securedcluster -A
+run "07-acs-central.txt"        get centrals.platform.stackrox.io -A
+run "07-acs-secured.txt"        get securedclusters.platform.stackrox.io -A
 run "07-compliance.txt"         get compliancesuite,compliancescan -A    # Compliance Operator, if present
 run "07-acm-policies.txt"       get policies.policy.open-cluster-management.io -A   # RHACM governance compliance, if ACM present
 # cert expiry from the not-after ANNOTATION only (metadata); the certificate and key bytes in .data are never read
@@ -230,9 +278,8 @@ run "08-cluster-monitoring.yaml" get configmap cluster-monitoring-config -n open
 run "08-uwm.yaml"               get configmap user-workload-monitoring-config -n openshift-user-workload-monitoring -o yaml
 run "08-prom-am.txt"            get prometheus,alertmanager -n openshift-monitoring
 run "08-alertmanagerconfig.txt" get alertmanagerconfig -A
-# Active alerts snapshot (GET via API-server service proxy; best effort — may be
-# denied by RBAC/oauth-proxy, in which case the .err file records why):
-run "08-active-alerts.json"     get --request-timeout=20s --raw "/api/v1/namespaces/openshift-monitoring/services/alertmanager-main:9094/proxy/api/v2/alerts?active=true"
+# Firing alerts: only with --alerts (no file at all without it)
+if [ "$ALERTS" != 0 ]; then collect_alerts; fi
 run "08-clusterlogging.txt"     get clusterlogging,clusterlogforwarder -n openshift-logging
 run "08-clusterlogging.yaml"    get clusterlogging,clusterlogforwarder -n openshift-logging -o yaml  # storage class, retention, outputs
 run "08-lokistack.txt"          get lokistack -A
@@ -253,7 +300,8 @@ log "Backup & DR"
 run "10-cronjobs.txt"           get cronjob -A
 run "10-oadp-dpa.txt"           get dataprotectionapplication -A
 run "10-backup-locations.txt"   get backupstoragelocation,volumesnapshotlocation -A
-run "10-velero-crs.txt"         get backup,restore,schedule -A
+# fully-qualified: bare "backup" also matches e.g. database-operator CRDs
+run "10-velero-crs.txt"         get backups.velero.io,restores.velero.io,schedules.velero.io -A
 run "10-kasten-policies.txt"    get policies.config.kio.kasten.io -A     # Kasten K10, if present
 run "10-etcd-backup-fg.txt"     get featuregate cluster -o jsonpath={.status.featureGates[0].enabled}
 
@@ -268,15 +316,40 @@ run "11-events-warning.txt"     get events -A --field-selector type=Warning --so
 log "GPU / NVIDIA DGX (skipped gracefully on non-GPU clusters)"
 run "12-gpu-node-labels.txt"    get nodes -L nvidia.com/gpu.present -L nvidia.com/gpu.count -L nvidia.com/gpu.product -L nvidia.com/gpu.machine -L nvidia.com/mig.config -L nvidia.com/mig.strategy -L nvidia.com/gpu.deploy.driver
 run "12-gpu-capacity.txt"       get nodes -o custom-columns=NAME:.metadata.name,GPU-CAP:.status.capacity.nvidia\\.com/gpu,GPU-ALLOC:.status.allocatable.nvidia\\.com/gpu,HUGEPG-2M:.status.capacity.hugepages-2Mi,HUGEPG-1G:.status.capacity.hugepages-1Gi
-run "12-clusterpolicy.yaml"     get clusterpolicy -A -o yaml             # driver version, MIG strategy, DCGM, GDS, vGPU, toolkit
-run "12-nfd.txt"                get nodefeaturediscovery -A              # Node Feature Discovery (GPU Operator prerequisite)
-run "12-nicclusterpolicy.yaml"  get nicclusterpolicy -A -o yaml          # NVIDIA Network Operator: MOFED/OFED, RDMA device plugin, IB
+# fully-qualified: bare "clusterpolicy" resolves to Kyverno's ClusterPolicy where Kyverno is installed
+run "12-clusterpolicy.yaml"     get clusterpolicies.nvidia.com -o yaml   # driver version, MIG strategy, DCGM, GDS, vGPU, toolkit, status.state
+run "12-nfd.txt"                get nodefeaturediscoveries.nfd.openshift.io -A   # Node Feature Discovery (GPU Operator prerequisite)
+run "12-nicclusterpolicy.yaml"  get nicclusterpolicies.mellanox.com -o yaml      # NVIDIA Network Operator: MOFED/OFED, RDMA device plugin, IB
 run "12-nvidia-networks.txt"    get macvlannetwork,hostdevicenetwork,ipoibnetwork -A   # Network Operator secondary networks
 run "12-sriov-node-state.txt"   get sriovnetworknodestate -n openshift-sriov-network-operator   # actual NIC/IB port state per node
 run "12-performanceprofile.yaml" get performanceprofile -o yaml          # CPU isolation, hugepages, topology policy
 run "12-gpu-operator-pods.txt"  get pods -n nvidia-gpu-operator -o wide  # driver/toolkit/device-plugin/DCGM daemonset health
 run "12-nv-network-pods.txt"    get pods -n nvidia-network-operator -o wide
 run "12-gpu-consumers.txt"      get pods -A -o custom-columns=NS:.metadata.namespace,NAME:.metadata.name,NODE:.spec.nodeName,GPU-LIMITS:.spec.containers[*].resources.limits.nvidia\\.com/gpu
+# GPU sharing: replicas > 1 or a product name ending in -SHARED = time-slicing; mig.config != all-disabled = MIG slices
+run "12-gpu-sharing.txt"        get nodes -l nvidia.com/gpu.present=true -o custom-columns=NAME:.metadata.name,PRODUCT:.metadata.labels.nvidia\\.com/gpu\\.product,GPU-MEM-MIB:.metadata.labels.nvidia\\.com/gpu\\.memory,REPLICAS:.metadata.labels.nvidia\\.com/gpu\\.replicas,SHARING:.metadata.labels.nvidia\\.com/gpu\\.sharing-strategy,MIG-CAPABLE:.metadata.labels.nvidia\\.com/mig\\.capable,MIG-CONFIG:.metadata.labels.nvidia\\.com/mig\\.config,MIG-STRATEGY:.metadata.labels.nvidia\\.com/mig\\.strategy,DRIVER:.metadata.labels.nvidia\\.com/cuda\\.driver-version\\.full
+run "12-gpu-servicemonitors.txt" get servicemonitors.monitoring.coreos.com -n nvidia-gpu-operator   # is DCGM (GPU metrics) scraped by Prometheus?
+
+# ---- 13. OpenShift AI / Kueue / training --------------------------------------
+# Best effort — every command degrades to a .err file on clusters without
+# OpenShift AI (RHOAI / Open Data Hub), Kueue or Kubeflow Trainer. All names
+# are fully qualified so they cannot resolve to another product's CRD.
+log "OpenShift AI / Kueue / training (skipped gracefully when not installed)"
+run "13-rhoai-dsc.yaml"         get datascienceclusters.datasciencecluster.opendatahub.io -o yaml   # component managementState, per-component conditions and versions
+run "13-rhoai-dsci.yaml"        get dscinitializations.dscinitialization.opendatahub.io -o yaml
+run "13-rhoai-auth.txt"         get auths.services.platform.opendatahub.io -o "custom-columns=NAME:.metadata.name,ADMIN-GROUPS:.spec.adminGroups[*],ALLOWED-GROUPS:.spec.allowedGroups[*]"   # who may use the dashboard
+run "13-rhoai-hardwareprofiles.txt" get hardwareprofiles.infrastructure.opendatahub.io -A
+run "13-rhoai-notebooks.txt"    get notebooks.kubeflow.org -A            # workbenches
+run "13-rhoai-dspa.txt"         get datasciencepipelinesapplications.datasciencepipelinesapplications.opendatahub.io -A   # pipeline servers
+run "13-rhoai-inferenceservices.txt" get inferenceservices.serving.kserve.io -A   # deployed models
+run "13-kueue-operator.txt"     get kueues.kueue.openshift.io -A         # Red Hat build of Kueue operand
+run "13-kueue-clusterqueues.txt" get clusterqueues.kueue.x-k8s.io
+run "13-kueue-localqueues.txt"  get localqueues.kueue.x-k8s.io -A        # which projects are queue-managed
+run "13-kueue-resourceflavors.txt" get resourceflavors.kueue.x-k8s.io
+run "13-kueue-workloads.txt"    get workloads.kueue.x-k8s.io -A          # admitted / pending / finished
+run "13-trainingruntimes.txt"   get clustertrainingruntimes.trainer.kubeflow.org
+run "13-trainjobs.txt"          get trainjobs.trainer.kubeflow.org -A    # Kubeflow Trainer v2
+run "13-pytorchjobs.txt"        get pytorchjobs.kubeflow.org -A          # deprecated Training Operator
 
 # ---- Summary ----------------------------------------------------------------
 log "Building SUMMARY.txt"
@@ -331,6 +404,10 @@ log "Building SUMMARY.txt"
   awk 'NR>1 && $2!="<none>" && $2!=""{n++} END{if(!n) print "  (no GPU nodes detected)"}' "$OUT/12-gpu-capacity.txt" 2>/dev/null
   GPU_PODS=$(awk 'NR>1 && $4 ~ /^[0-9]/' "$OUT/12-gpu-consumers.txt" 2>/dev/null | wc -l | tr -d ' ')
   echo "  pods requesting GPUs: ${GPU_PODS:-0}"
+  echo
+  echo "## OpenShift AI (DataScienceCluster phase; empty = not installed)"
+  grep -E '^    phase:' "$OUT/13-rhoai-dsc.yaml" 2>/dev/null | sed 's/^ */  /'
+  awk 'NR>1 && $3=="Failed"{n++} END{if(n) printf "  failed TrainJobs: %d\n", n}' "$OUT/13-trainjobs.txt" 2>/dev/null
   echo
   echo "## Nodes reporting pressure (Memory/Disk/PID/NetworkUnavailable)"
   awk 'NR>1 && ($3=="True"||$4=="True"||$5=="True"||$6=="True"){print "  "$1}' "$OUT/02-nodes-conditions.txt" 2>/dev/null | head -20

@@ -113,23 +113,37 @@ Strictly read-only: only `oc get`, `oc adm top`, `oc auth can-i`, `oc whoami`,
 Secret/ConfigMap *data* (one existence-only check for the kubeadmin secret,
 via `-o name`). Commands that fail (missing operator, RBAC denied) don't stop
 the run — each failure is recorded in a `.err` file next to the intended
-output, so "absent" and "not collectable" stay distinguishable.
+output, so "absent" and "not collectable" stay distinguishable. Every call
+carries a request timeout, so one hung API request cannot block the run; a
+call that times out is reported by the analyzer as a blind spot.
+
+Firing alerts are the one thing `oc` cannot read: Alertmanager sits behind an
+authenticating proxy that the API server cannot pass your login to. With
+`--alerts` the collector therefore sends one read-only HTTPS GET with `curl`
+to the cluster's own `alertmanager-main` route, using the token of your `oc`
+session (handed to curl on stdin, never on the command line). It is off by
+default, so the "`oc` read commands only" guarantee holds unless you ask.
+Without it the analyzer states that the alert state is unknown.
 
 ```
-./collect-ocp-review.sh [--sanitize] [cluster-label]
+./collect-ocp-review.sh [--sanitize] [--alerts] [cluster-label]
 ```
 
 | Parameter | Meaning |
 |---|---|
 | `cluster-label` | Optional name used in the bundle directory name (`ocp-review_<label>_<ts>`). Default: derived from the API server hostname. |
 | `-s`, `--sanitize` | After collecting, automatically run the sanitizer on the new bundle. |
+| `--alerts` | Also save the alerts firing now (`08-active-alerts.json`). Needs `curl` and a token login (`oc login --token` or user/password; not a certificate kubeconfig). |
+| `--alerts-insecure` | Same, without verifying the route's TLS certificate, for clusters whose ingress CA this machine does not trust. Your token is then sent to an unverified host. |
 | `-h`, `--help` | Show usage. |
 | `KUBECONFIG` (env) | Which cluster to collect from. |
+| `OCP_REVIEW_TIMEOUT` (env) | Request timeout per `oc` call. Default `120s`; raise it (e.g. `300s`) on very large or slow clusters. |
 
 Output: a **bundle directory** covering access/identity, version & lifecycle,
 nodes/machine-config, networking, storage (incl. ODF/Ceph), operators & OLM,
 workloads & tenancy, security & RBAC, observability, GitOps, backup/DR,
-warning events, and GPU/NVIDIA DGX (skipped gracefully on non-GPU clusters).
+warning events, GPU/NVIDIA DGX, and OpenShift AI / Kueue / training jobs
+(the last two are skipped gracefully where they are not installed).
 `SUMMARY.txt` at the top collects the red flags — read it first.
 
 Tip: use a **read-only audit account**. The script checks its own permissions
