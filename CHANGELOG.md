@@ -4,6 +4,21 @@ All notable changes to this toolkit are recorded here. Dates are ISO (YYYY-MM-DD
 
 ## [Unreleased]
 
+### Added
+
+- Analyzer uses the firing-alerts snapshot beyond critical alerts: warning
+  alerts are reported with how long each has been firing, and a firing
+  `AlertmanagerReceiversNotConfigured` (with no external Alertmanager
+  visible) turns "verify alert notifications reach a human" into a confirmed
+  finding. Info-level alerts and the always-on Watchdog stay in the overview,
+  which now lists alerts by name.
+
+### Changed
+
+- `--alerts` works from machines that do not trust the cluster's ingress
+  certificate: the route is then verified against the ingress CA the cluster
+  publishes, before the token is sent. `--alerts-insecure` is a last resort.
+
 ## [2026.11] - 2026-11-21
 
 OpenShift AI and GPU coverage, and a change in how reports are worded:

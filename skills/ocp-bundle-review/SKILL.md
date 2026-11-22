@@ -127,9 +127,15 @@ Work through ALL of these; each cites the file to check.
 
 **Observability**
 - `08-cluster-monitoring.yaml`: additionalAlertmanagerConfigs (forwarding to
-  a hub?) — receivers live in a Secret you cannot see, so ALWAYS phrase as
-  "verify a test alert reaches a human end-to-end".
-- `08-active-alerts.json`: triage critical alerts. `08-clusterlogging.yaml`:
+  a hub?) — receivers live in a Secret you cannot see, so phrase as
+  "verify a test alert reaches a human end-to-end" unless the alerts file
+  (next line) confirms that nothing is delivered.
+- `08-active-alerts.json` (only when collected with `--alerts`; absent =
+  alert state unknown, say so): triage critical alerts; list warnings with
+  how long each has been firing (weeks = nobody is watching); ignore the
+  always-on `Watchdog`. `AlertmanagerReceiversNotConfigured` firing with no
+  forwarding = the cluster itself confirms no notification is delivered.
+- `08-clusterlogging.yaml`:
   stack version, storage class, forwarder targets.
 
 **GPU / DGX (if `12-*` files present)**

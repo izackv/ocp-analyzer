@@ -109,9 +109,13 @@ for transport.
 
 Runs once per cluster, needs `oc` logged in (via `KUBECONFIG` or `oc login`).
 Strictly read-only: only `oc get`, `oc adm top`, `oc auth can-i`, `oc whoami`,
-`oc version`, `oc adm upgrade` and raw GET requests. It never reads
-Secret/ConfigMap *data* (one existence-only check for the kubeadmin secret,
-via `-o name`). Commands that fail (missing operator, RBAC denied) don't stop
+`oc version`, `oc adm upgrade` and raw GET requests. It never reads Secret
+*data* (Secrets are touched only for metadata: an existence check for
+kubeadmin via `-o name`, and certificate expiry annotations). It reads the
+*data* of exactly three platform ConfigMaps and of no application ConfigMap:
+the two monitoring configurations (`cluster-monitoring-config` and
+`user-workload-monitoring-config`, saved in the bundle) and, with `--alerts`
+only, the public ingress CA certificate (not saved). Commands that fail (missing operator, RBAC denied) don't stop
 the run — each failure is recorded in a `.err` file next to the intended
 output, so "absent" and "not collectable" stay distinguishable. Every call
 carries a request timeout, so one hung API request cannot block the run; a
@@ -125,6 +129,14 @@ session (handed to curl on stdin, never on the command line). It is off by
 default, so the "`oc` read commands only" guarantee holds unless you ask.
 Without it the analyzer states that the alert state is unknown.
 
+The route's certificate is always verified before the token is sent: first
+against the machine's own trust store, and if that fails, against the
+ingress CA the cluster publishes (the public certificate in the
+`default-ingress-cert` ConfigMap, read with one more `oc get` and not kept in
+the bundle). So `--alerts` normally works from any bastion. Only when neither
+verifies - for example a custom ingress certificate from a CA that is in
+neither place - does the collector stop and name `--alerts-insecure`.
+
 ```
 ./collect-ocp-review.sh [--sanitize] [--alerts] [cluster-label]
 ```
@@ -134,7 +146,7 @@ Without it the analyzer states that the alert state is unknown.
 | `cluster-label` | Optional name used in the bundle directory name (`ocp-review_<label>_<ts>`). Default: derived from the API server hostname. |
 | `-s`, `--sanitize` | After collecting, automatically run the sanitizer on the new bundle. |
 | `--alerts` | Also save the alerts firing now (`08-active-alerts.json`). Needs `curl` and a token login (`oc login --token` or user/password; not a certificate kubeconfig). |
-| `--alerts-insecure` | Same, without verifying the route's TLS certificate, for clusters whose ingress CA this machine does not trust. Your token is then sent to an unverified host. |
+| `--alerts-insecure` | Same, without verifying the route's TLS certificate. Last resort, for when `--alerts` reports that it cannot verify it. Your token is then sent to an unverified host. |
 | `-h`, `--help` | Show usage. |
 | `KUBECONFIG` (env) | Which cluster to collect from. |
 | `OCP_REVIEW_TIMEOUT` (env) | Request timeout per `oc` call. Default `120s`; raise it (e.g. `300s`) on very large or slow clusters. |
@@ -319,7 +331,11 @@ as a self-check that the tools work there.
 
 ## Safety & data-handling notes
 
-- The collector is strictly read-only and never reads Secret/ConfigMap data.
+- The collector is strictly read-only and never reads Secret data. The only
+  ConfigMap data it reads are the two platform monitoring configurations
+  (saved in the bundle - review them before sharing, they can name external
+  endpoints) and, with `--alerts`, the public ingress CA certificate (not
+  saved). No application ConfigMap is read.
 - Bundles still contain sensitive metadata: usernames, hostnames, IPs, the
   full application route inventory. Treat every bundle as confidential;
   sanitize before any external sharing.

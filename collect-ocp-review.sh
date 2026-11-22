@@ -16,9 +16,14 @@
 # now. Alertmanager cannot be read through oc, so this sends ONE read-only
 # HTTPS GET with curl to the cluster's own alertmanager-main route, with the
 # token of your oc session. Off unless you ask for it.
+# The route's certificate is checked against this machine's trust store and,
+# failing that, against the ingress CA the cluster publishes (the public
+# certificate in configmap default-ingress-cert).
 #
 # Data sensitivity:
-#   This script does NOT read Secret or ConfigMap *data*. It does capture:
+#   This script does NOT read Secret *data*, and reads the *data* of only
+#   three platform ConfigMaps (the two monitoring configurations, saved in
+#   the bundle; the public ingress CA with --alerts, not saved). It captures:
 #     - user / group / service-account identities (RBAC, identities, OAuth)
 #     - internal hostnames, FQDNs and IP addresses (nodes, routes, services)
 #     - cluster ID, base domain, registry/mirror references, route inventory
@@ -33,8 +38,8 @@
 #   ./collect-ocp-review.sh [--sanitize] [--alerts] [cluster-label]
 #   --alerts            also save the firing alerts (see the note above)
 #   --alerts-insecure   same, without checking the route's TLS certificate
-#                       (for clusters whose ingress CA this machine does not
-#                       trust; your token is then sent to an unverified host)
+#                       (last resort, when --alerts cannot verify it; your
+#                       token is then sent to an unverified host)
 #
 set -uo pipefail
 
@@ -55,7 +60,7 @@ for arg in "$@"; do
     --alerts) ALERTS=1 ;;
     --alerts-insecure) ALERTS=2 ;;
     -h|--help)
-      sed -n '2,38p' "$0"; exit 0 ;;
+      sed -n '2,43p' "$0"; exit 0 ;;
     -*) echo "unknown option: $arg (see --help)" >&2; exit 2 ;;
     *) CLUSTER_LABEL="$arg" ;;
   esac
@@ -98,7 +103,7 @@ run() {
 # can never authenticate there. The supported way is the route plus a token.
 # The token goes to curl on stdin (-K -), never on the command line.
 collect_alerts() {
-  local name="08-active-alerts.json" f host token rc insecure=""
+  local name="08-active-alerts.json" f host token rc cafile="" ca_tried=0
   f="$OUT/$name"
   fail() { echo "$1" > "$f.err"; echo "(command failed or resource absent — see $name.err)" > "$f"; }
   command -v curl >/dev/null 2>&1 || { fail "error: curl is missing on this machine"; return; }
@@ -106,12 +111,32 @@ collect_alerts() {
   [ -n "$host" ] || { fail "error: cannot read the alertmanager-main route: $(cat "$f.err")"; return; }
   token="$(oc whoami -t 2>/dev/null)"
   [ -n "$token" ] || { fail "error: this oc session has no token (certificate login); log in with a token to collect alerts"; return; }
-  [ "$ALERTS" = 2 ] && insecure="--insecure"
-  printf 'header = "Authorization: Bearer %s"\n' "$token" |
-    curl -sS --fail --max-time 60 $insecure -K - -o "$f" "https://$host/api/v2/alerts?active=true" 2>"$f.err"
-  rc=$?
-  if [ "$rc" = 60 ]; then
-    fail "error: the TLS certificate of $host is unknown to this machine; re-run with --alerts-insecure, or add the ingress CA to the system trust store"
+  # one read-only GET; extra curl options come in as arguments, the token
+  # goes in on stdin so it never shows on a command line
+  fetch() {
+    printf 'header = "Authorization: Bearer %s"\n' "$token" |
+      curl -sS --fail --max-time 60 "$@" -K - -o "$f" "https://$host/api/v2/alerts?active=true" 2>"$f.err"
+  }
+  if [ "$ALERTS" = 2 ]; then
+    fetch --insecure; rc=$?
+  else
+    fetch; rc=$?
+    if [ "$rc" = 60 ]; then
+      # This machine does not trust the route's certificate. Verify it against
+      # the CA the cluster publishes for its own ingress instead (a public
+      # certificate in a ConfigMap; kept in a temp file, not in the bundle).
+      if cafile="$(mktemp 2>/dev/null)"; then
+        oc --request-timeout="$REQUEST_TIMEOUT" get configmap default-ingress-cert \
+          -n openshift-config-managed -o 'jsonpath={.data.ca-bundle\.crt}' > "$cafile" 2>/dev/null
+        if [ -s "$cafile" ]; then fetch --cacert "$cafile"; rc=$?; ca_tried=1; fi
+        rm -f "$cafile"
+      fi
+    fi
+  fi
+  if [ "$rc" = 60 ] && [ "$ca_tried" = 1 ]; then
+    fail "error: the TLS certificate of $host is unknown to this machine and is not signed by the cluster's published ingress CA (default-ingress-cert) either; re-run with --alerts-insecure, or add the right CA to the system trust store"
+  elif [ "$rc" = 60 ]; then
+    fail "error: the TLS certificate of $host is unknown to this machine and the cluster's ingress CA (configmap default-ingress-cert in openshift-config-managed) could not be read; re-run with --alerts-insecure, or add the ingress CA to the system trust store"
   elif [ "$rc" != 0 ] || [ "$(head -c 1 "$f" 2>/dev/null)" != "[" ]; then
     fail "error: request to https://$host/api/v2/alerts failed (curl exit $rc): $(cat "$f.err")"
   else

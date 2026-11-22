@@ -121,10 +121,43 @@ RHOAI_DEPENDENCIES = [
     ("trainer", "Managed", r"jobset-operator|job-set", "JobSet Operator"),
     ("kueue", "Unmanaged", r"kueue-operator", "Red Hat build of Kueue"),
 ]
+# firing-alerts snapshot (collector --alerts)
+NO_RECEIVER_ALERT = "AlertmanagerReceiversNotConfigured"
+ALWAYS_ON_ALERTS = ("Watchdog",)      # fires by design, proves the pipeline
+STALE_ALERT_DAYS = 2                  # firing this long = nobody acted on it
+
+
+def _firing_for(days):
+    """' for ~N days' suffix for an alert's age; '' when unknown."""
+    if days is None:
+        return ""
+    if days < 1:
+        return " for less than a day"
+    return " for ~%d day%s" % (days, "" if days == 1 else "s")
+
+
+def alerts_summary(rows):
+    """Readable one-liner for the overview from _firing_alerts() rows."""
+    by = {}
+    for name, sev, _ns, _days in rows:
+        if name in ALWAYS_ON_ALERTS:
+            continue
+        by.setdefault(sev, []).append(name)
+    order = ["critical", "warning", "info"]
+    parts = ["%d %s (%s)" % (len(by[s]), s, ", ".join(sorted(by[s])))
+             for s in order + sorted(k for k in by if k not in order)
+             if s in by]
+    always = sorted({r[0] for r in rows if r[0] in ALWAYS_ON_ALERTS})
+    if always:
+        parts.append("%s (always on by design)" % ", ".join(always))
+    return "; ".join(parts) or "none"
+
+
 # Known issues from the release notes, keyed by the RHOAI minor they were
 # published for. They go stale: prune/extend on every knowledge refresh.
 # The trigger conditions live in Analyzer.check_rhoai.
 RHOAI_KNOWLEDGE_DATE = "2026-11"
+
 RHOAI_KNOWN_ISSUES = {
     "RHOAIENG-87625": ("3.5", "TrainJobs do not work together with Red Hat "
                               "build of Kueue 1.4 or later"),
@@ -1872,58 +1905,163 @@ class Analyzer(object):
         # the alert path is broken or ignored, not just "verify it"
         unnoticed = self.facts.get("unnoticed_failure_days", 0)
         UNNOTICED_MIN = 3
-        self.add("HIGH" if (not fwd or unnoticed >= UNNOTICED_MIN) else "MEDIUM",
-                 "Observability",
-                 "Verify alert notifications reach a human"
-                 + (" - evidence suggests they do NOT"
-                    if unnoticed >= UNNOTICED_MIN
-                    else ""),
-                 fwd_evidence
-                 + (" Empirical signal: backup jobs have been failing for "
-                    "at least ~%.0f days without correction - either no "
-                    "alert fires for them or nobody acts on it."
-                    % unnoticed if unnoticed >= UNNOTICED_MIN else ""),
-                 "Alertmanager receiver config lives in a Secret this bundle "
-                 "does not (and should not) collect - silent-alerting is the "
-                 "most common root cause of long outages.",
-                 "Send a synthetic test alert and confirm the on-call channel "
-                 "receives it end-to-end"
-                 + ("; add an explicit alert on failed backup jobs."
-                    if unnoticed >= UNNOTICED_MIN else "."),
-                 assumption="Receiver configuration is in a Secret and "
-                            "therefore invisible to this analyzer; this "
-                            "finding is a mandatory manual verification, not "
-                            "a confirmed defect.")
-        alerts = self.b.read("08-active-alerts.json")
+        unnoticed_evidence = (
+            " Empirical signal: backup jobs have been failing for at least "
+            "~%.0f days without correction - either no alert fires for them "
+            "or nobody acts on it." % unnoticed
+            if unnoticed >= UNNOTICED_MIN else "")
+        backup_rec = ("; add an explicit alert on failed backup jobs."
+                      if unnoticed >= UNNOTICED_MIN else ".")
+        firing = self._firing_alerts()      # None: not collected / unreadable
+        no_receiver = next((x for x in firing or []
+                            if x[0] == NO_RECEIVER_ALERT), None)
+        if no_receiver and not fwd:
+            # the cluster itself says nothing delivers its alerts, and no
+            # external Alertmanager is visible either: confirmed, not a
+            # "please verify"
+            self.add("HIGH", "Observability",
+                     "Cluster reports no alert receiver configured - "
+                     "notifications reach no one",
+                     "08-active-alerts.json: %s firing%s. %s%s"
+                     % (NO_RECEIVER_ALERT, _firing_for(no_receiver[3]),
+                        fwd_evidence, unnoticed_evidence),
+                     "Alerts fire inside the cluster but nothing delivers "
+                     "them: failures stay unseen until users report them - "
+                     "the most common root cause of long outages.",
+                     "Configure an Alertmanager receiver for the on-call "
+                     "channel, then send a synthetic test alert and confirm "
+                     "it arrives end-to-end" + backup_rec,
+                     assumption="Based on the cluster's own %s alert at "
+                                "collection time and on no external "
+                                "Alertmanager target being visible. A team "
+                                "that watches the console, or an external "
+                                "tool that polls the cluster, would not show "
+                                "in this bundle." % NO_RECEIVER_ALERT)
+        else:
+            if no_receiver:
+                receiver_evidence = (
+                    " 08-active-alerts.json: %s is firing%s - the in-cluster "
+                    "Alertmanager has no receiver, so delivery depends "
+                    "entirely on the external target."
+                    % (NO_RECEIVER_ALERT, _firing_for(no_receiver[3])))
+            elif firing is not None:
+                receiver_evidence = (
+                    " 08-active-alerts.json: %s is not firing, so at least "
+                    "one receiver is configured (whether it reaches a human "
+                    "is still unverified)." % NO_RECEIVER_ALERT)
+            else:
+                receiver_evidence = ""
+            self.add("HIGH" if (not fwd or unnoticed >= UNNOTICED_MIN)
+                     else "MEDIUM",
+                     "Observability",
+                     "Verify alert notifications reach a human"
+                     + (" - evidence suggests they do NOT"
+                        if unnoticed >= UNNOTICED_MIN
+                        else ""),
+                     fwd_evidence + receiver_evidence + unnoticed_evidence,
+                     "Alertmanager receiver config lives in a Secret this "
+                     "bundle does not (and should not) collect - "
+                     "silent-alerting is the most common root cause of long "
+                     "outages.",
+                     "Send a synthetic test alert and confirm the on-call "
+                     "channel receives it end-to-end" + backup_rec,
+                     assumption="Receiver configuration is in a Secret and "
+                                "therefore invisible to this analyzer; this "
+                                "finding is a mandatory manual verification, "
+                                "not a confirmed defect.")
         if self.b.status("08-active-alerts.json") == S_MISSING:
             self.assumptions.append(
                 "Firing alerts were NOT collected (the collector saves them "
                 "only when run with --alerts): the cluster's alert state at "
                 "collection time is UNKNOWN - check Observe > Alerting.")
-        if alerts:
-            try:
-                data = json.loads(alerts)
-                sev = {}
-                for a in data:
-                    s = a.get("labels", {}).get("severity", "none")
-                    sev[s] = sev.get(s, 0) + 1
-                crit = sev.get("critical", 0)
-                self.facts["active_alerts"] = sev
-                if crit:
-                    names = sorted({a["labels"].get("alertname", "?")
-                                    for a in data
-                                    if a.get("labels", {}).get("severity") == "critical"})
-                    self.add("CRITICAL", "Observability",
-                             "%d critical alert(s) firing at collection time" % crit,
-                             "08-active-alerts.json: " + ", ".join(names[:8]),
-                             "Active critical alerts are unresolved incidents.",
-                             "Triage every firing alert to zero, runbooks "
-                             "first.")
-            except (ValueError, KeyError):
-                pass
+        if firing is not None:
+            sev = {}
+            for x in firing:
+                sev[x[1]] = sev.get(x[1], 0) + 1
+            self.facts["active_alerts"] = sev
+            self.facts["active_alert_list"] = firing
+
+            def listed(rows):
+                rows = sorted(rows, key=lambda x: (-(x[3] or 0), x[0]))
+                return "; ".join(
+                    "%s (%s)" % (x[0], ", ".join(
+                        v for v in (x[2], _firing_for(x[3]).strip()) if v))
+                    if (x[2] or x[3] is not None) else x[0]
+                    for x in rows[:10]) \
+                    + (" ... +%d more" % (len(rows) - 10)
+                       if len(rows) > 10 else "")
+
+            crit = [x for x in firing if x[1] == "critical"]
+            if crit:
+                self.add("CRITICAL", "Observability",
+                         "%d critical alert(s) firing at collection time"
+                         % len(crit),
+                         "08-active-alerts.json: " + listed(crit),
+                         "Active critical alerts are unresolved incidents.",
+                         "Triage every firing alert to zero, runbooks "
+                         "first.")
+            warn = [x for x in firing if x[1] == "warning"]
+            if warn:
+                longest = max(x[3] or 0 for x in warn)
+                stale = longest >= STALE_ALERT_DAYS
+                self.add("LOW", "Observability",
+                         "%d warning alert(s) firing at collection time"
+                         % len(warn)
+                         + (" - the longest for ~%d days" % longest
+                            if stale else ""),
+                         "08-active-alerts.json: " + listed(warn),
+                         "Each is a condition the platform flags as needing "
+                         "attention."
+                         + (" Alerts left firing for days suggest that "
+                            "nobody is watching them, and standing noise "
+                            "hides the next real alert." if stale else ""),
+                         "Review each alert with its runbook; resolve the "
+                         "cause, or - where it is understood and accepted - "
+                         "silence it with a named owner and an expiry date.",
+                         assumption="Durations compare the alert's start "
+                                    "time (UTC) with the bundle timestamp "
+                                    "(collector's local time) and are "
+                                    "approximate. Info-level alerts and the "
+                                    "always-on Watchdog are listed in the "
+                                    "overview only.")
         if self.b.exists("08-clusterlogging.txt") and \
            not self.b.exists("08-lokistack.txt"):
             pass  # logging stack finding handled in check_olm via CSV version
+
+    def _firing_alerts(self):
+        """[(alertname, severity, namespace, days firing or None)] from the
+        --alerts snapshot; None when it was not collected or is unreadable."""
+        raw = self.b.read("08-active-alerts.json")
+        if not raw:
+            return None
+        try:
+            data = json.loads(raw)
+        except ValueError:
+            return None
+        if not isinstance(data, list):
+            return None
+        now = self._collection_time()
+        out = []
+        for a in data:
+            if not isinstance(a, dict):
+                continue
+            if (a.get("status") or {}).get("state", "active") != "active":
+                continue                    # silenced / inhibited
+            lab = a.get("labels") or {}
+            days = None
+            m = re.match(r"(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2}:\d{2})",
+                         a.get("startsAt") or "")
+            if m and now:
+                try:
+                    start = datetime.strptime(m.group(1) + m.group(2),
+                                              "%Y-%m-%d%H:%M:%S")
+                    days = max(0, (now - start).days)
+                except ValueError:
+                    pass
+            out.append((lab.get("alertname", "?"),
+                        lab.get("severity", "none"),
+                        lab.get("namespace", ""), days))
+        return out
 
     def _pod_states(self):
         """{(namespace, pod): (status, age)} from 06-pods-all.txt."""
@@ -3536,8 +3674,9 @@ def render_overview(a, bundle_name):
     L.append("- Alert forwarding configured: %s"
              % ("yes (additional Alertmanager targets)" if f.get("alert_forwarding")
                 else "not visible"))
-    if f.get("active_alerts"):
-        L.append("- Alerts firing at collection: %s" % f["active_alerts"])
+    if f.get("active_alert_list") is not None:
+        L.append("- Alerts firing at collection: %s"
+                 % alerts_summary(f["active_alert_list"]))
     L.append("")
     ai = f.get("rhoai")
     if ai:

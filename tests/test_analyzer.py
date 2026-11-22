@@ -6,6 +6,7 @@ All fixtures are synthetic - no customer-derived strings may appear here.
     python3 -m unittest discover tests
 """
 import importlib.util
+import json
 import re
 import sys
 import tempfile
@@ -1357,6 +1358,25 @@ class TestRhoaiChecks(unittest.TestCase):
 class TestActiveAlerts(unittest.TestCase):
     ALERTS = ('[{"labels": {"alertname": "EtcdDown", "severity": "critical"}},'
               ' {"labels": {"alertname": "Slow", "severity": "warning"}}]')
+    NAME = "ocp-review_lab_20261122-031932"     # gives a collection time
+
+    @staticmethod
+    def alert(name, sev, starts="2026-11-21T10:00:00Z", ns="openshift-x",
+              state="active"):
+        return {"labels": {"alertname": name, "severity": sev,
+                           "namespace": ns},
+                "status": {"state": state}, "startsAt": starts}
+
+    def run_with(self, tmp, alerts, extra=None):
+        files = {"08-active-alerts.json": json.dumps(alerts)}
+        files.update(extra or {})
+        d = Path(tmp) / self.NAME
+        d.mkdir()
+        for n, c in files.items():
+            (d / n).write_text(c)
+        a = oa.Analyzer(oa.Bundle(d))
+        a.check_monitoring()
+        return a
 
     def test_collected_alerts_are_reported(self):
         with tempfile.TemporaryDirectory() as t:
@@ -1374,6 +1394,95 @@ class TestActiveAlerts(unittest.TestCase):
             a.check_monitoring()
             self.assertTrue(any("NOT collected" in x for x in a.assumptions))
             self.assertNotIn("active_alerts", a.facts)
+            self.assertIn("Verify alert notifications reach a human",
+                          titles(a))
+
+    def test_no_receiver_alert_confirms_the_notification_finding(self):
+        with tempfile.TemporaryDirectory() as t:
+            a = self.run_with(t, [self.alert(
+                oa.NO_RECEIVER_ALERT, "warning", "2026-10-21T08:00:00Z")])
+            self.assertNotIn("Verify alert notifications reach a human",
+                             titles(a))
+            f = next(x for x in a.findings
+                     if x["title"].startswith("Cluster reports no alert "
+                                              "receiver configured"))
+            self.assertEqual(f["sev"], "HIGH")
+            self.assertIn("for ~31 days", f["evidence"])
+            self.assertNotIn("not a confirmed defect", f["assumption"])
+
+    def test_no_receiver_with_external_alertmanager_stays_a_verification(self):
+        mon = ("data:\n  config.yaml: |\n    prometheusK8s:\n"
+               "      additionalAlertmanagerConfigs:\n      - scheme: https\n")
+        with tempfile.TemporaryDirectory() as t:
+            a = self.run_with(t, [self.alert(oa.NO_RECEIVER_ALERT, "warning")],
+                              {"08-cluster-monitoring.yaml": mon})
+            f = next(x for x in a.findings
+                     if x["title"] == "Verify alert notifications reach a human")
+            self.assertIn("depends entirely on the external target",
+                          f["evidence"])
+
+    def test_receiver_alert_absent_is_cited_but_still_unverified(self):
+        with tempfile.TemporaryDirectory() as t:
+            a = self.run_with(t, [self.alert("Watchdog", "none")])
+            f = next(x for x in a.findings
+                     if x["title"] == "Verify alert notifications reach a human")
+            self.assertIn("at least one receiver is configured", f["evidence"])
+
+    def test_long_firing_warnings_are_one_low_finding(self):
+        with tempfile.TemporaryDirectory() as t:
+            a = self.run_with(t, [
+                self.alert("TargetDown", "warning", "2026-10-28T00:00:00Z"),
+                self.alert("Fresh", "warning", "2026-11-22T01:00:00Z"),
+                self.alert("Watchdog", "none"),
+                self.alert("UpdateAvailable", "info")])
+            f = [x for x in a.findings if "warning alert(s) firing" in x["title"]]
+            self.assertEqual(len(f), 1)
+            self.assertEqual(f[0]["sev"], "LOW")
+            self.assertEqual(f[0]["title"], "2 warning alert(s) firing at "
+                             "collection time - the longest for ~25 days")
+            self.assertIn("TargetDown (openshift-x, for ~25 days)",
+                          f[0]["evidence"])
+            self.assertIn("Fresh (openshift-x, for less than a day)",
+                          f[0]["evidence"])
+            for quiet in ("Watchdog", "UpdateAvailable"):
+                self.assertNotIn(quiet, f[0]["evidence"])
+
+    def test_fresh_warnings_carry_no_staleness_claim(self):
+        with tempfile.TemporaryDirectory() as t:
+            a = self.run_with(t, [self.alert("Fresh", "warning",
+                                             "2026-11-22T01:00:00Z")])
+            f = next(x for x in a.findings
+                     if "warning alert(s) firing" in x["title"])
+            self.assertEqual(f["title"],
+                             "1 warning alert(s) firing at collection time")
+            self.assertNotIn("nobody is watching", f["risk"])
+
+    def test_info_and_watchdog_alone_raise_no_alert_finding(self):
+        with tempfile.TemporaryDirectory() as t:
+            a = self.run_with(t, [self.alert("Watchdog", "none"),
+                                  self.alert("UpdateAvailable", "info")])
+            self.assertFalse([x for x in titles(a) if "alert(s) firing" in x])
+
+    def test_silenced_alerts_are_ignored(self):
+        with tempfile.TemporaryDirectory() as t:
+            a = self.run_with(t, [self.alert("Muted", "critical",
+                                             state="suppressed")])
+            self.assertFalse([x for x in titles(a) if "alert(s) firing" in x])
+            self.assertEqual(a.facts["active_alerts"], {})
+
+    def test_unreadable_snapshot_does_not_crash_or_claim_anything(self):
+        with tempfile.TemporaryDirectory() as t:
+            a = analyzer(t, {"08-active-alerts.json": '{"status": "error"}'})
+            a.check_monitoring()
+            self.assertNotIn("active_alerts", a.facts)
+
+    def test_overview_line_is_readable(self):
+        rows = [("TargetDown", "warning", "ns", 25), ("B", "warning", "", 1),
+                ("UpdateAvailable", "info", "", 3), ("Watchdog", "none", "", 9)]
+        self.assertEqual(oa.alerts_summary(rows),
+                         "2 warning (B, TargetDown); 1 info (UpdateAvailable); "
+                         "Watchdog (always on by design)")
+        self.assertEqual(oa.alerts_summary([]), "none")
 
 
 class TestOvnkubeCoverage(unittest.TestCase):
@@ -1517,6 +1626,35 @@ class TestCollectorScript(unittest.TestCase):
         self.assertIn("-K -", curl[0])
         self.assertNotIn("$token", curl[0])
         self.assertNotIn("-X", curl[0])            # plain GET only
+
+    def test_alerts_verify_tls_with_the_cluster_ingress_ca_before_giving_up(self):
+        self.assertIn("get configmap default-ingress-cert", self.SCRIPT)
+        self.assertIn('fetch --cacert "$cafile"', self.SCRIPT)
+        self.assertIn('rm -f "$cafile"', self.SCRIPT)       # CA not kept
+        # verification is only switched off by the explicit flag
+        insecure = [l.strip() for l in self.SCRIPT.splitlines()
+                    if "--insecure" in l and not l.lstrip().startswith("#")
+                    and "fail " not in l and "ALERTS=2" not in l]
+        self.assertEqual(insecure, ["fetch --insecure; rc=$?"])
+        self.assertIn('if [ "$ALERTS" = 2 ]; then\n    fetch --insecure',
+                      self.SCRIPT)
+
+    def test_configmap_and_secret_reads_match_the_documented_claim(self):
+        """README: Secret data never; ConfigMap data of three named objects."""
+        cms = set(re.findall(r"get (?:configmaps?|cm) +(\S+)", self.SCRIPT))
+        self.assertEqual(cms, {"cluster-monitoring-config",
+                               "user-workload-monitoring-config",
+                               "default-ingress-cert"})
+        readme = (REPO / "README.md").read_text()
+        for name in ("cluster-monitoring-config",
+                     "user-workload-monitoring-config"):
+            self.assertIn(name, readme)
+        self.assertNotIn("Secret/ConfigMap", readme)
+        for name, args in self.collected().items():
+            if re.match(r"get secrets?\b", args):
+                self.assertRegex(args, r"-o (name|custom-columns=)",
+                                 "%s could print Secret data" % name)
+                self.assertNotIn(".data", args)
 
     def test_every_call_has_a_request_timeout(self):
         self.assertIn('oc --request-timeout="$REQUEST_TIMEOUT" "$@"',
