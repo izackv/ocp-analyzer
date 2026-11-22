@@ -4,6 +4,11 @@ All notable changes to this toolkit are recorded here. Dates are ISO (YYYY-MM-DD
 
 ## [Unreleased]
 
+## [2026.11.1] - 2026-11-22
+
+The firing-alerts snapshot now works from a bastion and is actually used by
+the analyzer. Bundle format unchanged (2); `BUILD_KNOWLEDGE_DATE` unchanged.
+
 ### Added
 
 - Analyzer uses the firing-alerts snapshot beyond critical alerts: warning
@@ -18,6 +23,13 @@ All notable changes to this toolkit are recorded here. Dates are ISO (YYYY-MM-DD
 - `--alerts` works from machines that do not trust the cluster's ingress
   certificate: the route is then verified against the ingress CA the cluster
   publishes, before the token is sent. `--alerts-insecure` is a last resort.
+
+### Fixed
+
+- README and script header claimed that no ConfigMap data is read. Stated
+  accurately now: Secret data is never read; ConfigMap data is read from the
+  two platform monitoring configurations (saved in the bundle) and, with
+  `--alerts`, the public ingress CA (not saved).
 
 ## [2026.11] - 2026-11-21
 
