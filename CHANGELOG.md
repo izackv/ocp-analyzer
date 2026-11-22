@@ -4,6 +4,12 @@ All notable changes to this toolkit are recorded here. Dates are ISO (YYYY-MM-DD
 
 ## [Unreleased]
 
+## [2026.11.2] - 2026-11-22
+
+The collector no longer saves a secret it used to save, and the analyzer
+loses five false positives found by a field review. Bundle format unchanged
+(2); `BUILD_KNOWLEDGE_DATE` unchanged.
+
 ### Fixed
 
 - Collector saved one real secret: the image registry's `httpSecret` (from
