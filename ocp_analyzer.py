@@ -95,6 +95,7 @@ OPERATOR_SCC_HINTS = [
     ("insights-runtime-extractor", "insights"),
     ("nvidia", "gpu-operator"), ("sriov", "sriov"),
     ("stackrox|rhacs", "rhacs|stackrox"), ("elasticsearch", "elasticsearch"),
+    ("nfd-", r"\bnfd\."), ("openshift-ai-|run-as-ray-user", "rhods-operator|opendatahub"),
 ]
 # capabilities that make an SCC root-equivalent-ish even with PRIV=false
 DANGEROUS_CAPS_RE = re.compile(
@@ -121,10 +122,24 @@ RHOAI_DEPENDENCIES = [
     ("trainer", "Managed", r"jobset-operator|job-set", "JobSet Operator"),
     ("kueue", "Unmanaged", r"kueue-operator", "Red Hat build of Kueue"),
 ]
+# secret-shaped content that can sit in ordinary (non-Secret) objects; the
+# collector redacts the last two since 2026.11.2, older bundles carry them
+SECRET_SHAPED_RES = [
+    re.compile(r"(clientSecret|bindPassword|password|token):\s*"
+               r"[A-Za-z0-9+/=_-]{12,}\s*$", re.M),
+    # image registry config: spec.httpSecret
+    re.compile(r"httpSecret\"?:\s*\"?[0-9a-fA-F]{16,}"),
+    # credentials inside a URL: scheme://user:password@host
+    re.compile(r"[a-zA-Z][a-zA-Z0-9+.-]*://(?!REDACTED)[^/@:\s\"']+:"
+               r"(?!REDACTED)[^/@\s\"']+@"),
+]
+
 # firing-alerts snapshot (collector --alerts)
 NO_RECEIVER_ALERT = "AlertmanagerReceiversNotConfigured"
 ALWAYS_ON_ALERTS = ("Watchdog",)      # fires by design, proves the pipeline
 STALE_ALERT_DAYS = 2                  # firing this long = nobody acted on it
+INSIGHTS_ALERT = "InsightsRecommendationActive"   # always severity info
+INSIGHTS_HIGH_RISK = ("Important", "Critical")
 
 
 def _firing_for(days):
@@ -139,7 +154,8 @@ def _firing_for(days):
 def alerts_summary(rows):
     """Readable one-liner for the overview from _firing_alerts() rows."""
     by = {}
-    for name, sev, _ns, _days in rows:
+    for row in rows:
+        name, sev = row[0], row[1]
         if name in ALWAYS_ON_ALERTS:
             continue
         by.setdefault(sev, []).append(name)
@@ -1489,6 +1505,12 @@ class Analyzer(object):
                 ns_by_csv.setdefault(tok[1], set()).add(tok[0])
         owning_ns = {ns for name, nss in ns_by_csv.items()
                      if len(nss) <= 2 for ns in nss}
+        # an operator installed for all namespaces has its CSV copied into
+        # every namespace, so the CSV table cannot tell the original from
+        # the copies - the Subscription marks the namespace that owns it
+        owning_ns |= {l.split()[0]
+                      for l in self.b.lines("05-subscriptions.txt")
+                      if l.split()}
         remnants = sorted(ns for ns in og_ns - owning_ns
                           if not PLATFORM_NS_RE.match(ns))
         if remnants:
@@ -1886,21 +1908,25 @@ class Analyzer(object):
                             "(08-cluster-monitoring.yaml: %s) - monitoring "
                             "runs on stock defaults, no alert forwarding "
                             "configured." % mon_status)
-            mon_pvcs = [l for l in self.b.lines("04-pvc.txt")
-                        if l.split() and l.split()[0] == "openshift-monitoring"]
-            if not mon_pvcs and self.b.status("04-pvc.txt") in (S_OK, S_EMPTY):
-                self.add("MEDIUM", "Observability",
-                         "Monitoring stack runs on ephemeral storage "
-                         "(defaults in effect)",
-                         "cluster-monitoring-config not found + 04-pvc.txt: "
-                         "no PVCs in openshift-monitoring.",
-                         "Prometheus/Alertmanager state lives on emptyDir: "
-                         "every pod restart or node reboot erases all metric "
-                         "history and silences - post-incident analysis "
-                         "becomes impossible.",
-                         "Create cluster-monitoring-config with "
-                         "volumeClaimTemplates (and a retention policy) on a "
-                         "suitable StorageClass.")
+        mon_pvcs = [l for l in self.b.lines("04-pvc.txt")
+                    if l.split() and l.split()[0] == "openshift-monitoring"]
+        if not mon_pvcs and self.b.status("04-pvc.txt") in (S_OK, S_EMPTY) \
+                and "volumeClaimTemplate" not in mon:
+            absent = mon_status != S_OK
+            self.add("MEDIUM", "Observability",
+                     "Monitoring stack runs on ephemeral storage"
+                     + (" (defaults in effect)" if absent else ""),
+                     ("cluster-monitoring-config not found"
+                      if absent else
+                      "08-cluster-monitoring.yaml: no volumeClaimTemplate")
+                     + " + 04-pvc.txt: no PVCs in openshift-monitoring.",
+                     "Prometheus/Alertmanager state lives on emptyDir: "
+                     "every pod restart or node reboot erases all metric "
+                     "history and silences - post-incident analysis "
+                     "becomes impossible.",
+                     "Give Prometheus and Alertmanager persistent storage "
+                     "(volumeClaimTemplate in cluster-monitoring-config, "
+                     "with a retention policy) on a suitable StorageClass.")
         # empirical cross-check: a failure nobody fixed for days is PROOF
         # the alert path is broken or ignored, not just "verify it"
         unnoticed = self.facts.get("unnoticed_failure_days", 0)
@@ -2000,6 +2026,37 @@ class Analyzer(object):
                          "Active critical alerts are unresolved incidents.",
                          "Triage every firing alert to zero, runbooks "
                          "first.")
+            # Red Hat Insights reports its recommendations as an info-level
+            # alert whatever their risk; the risk is in the total_risk label
+            insights = [x for x in firing
+                        if x[0] == INSIGHTS_ALERT and len(x) > 4
+                        and x[4].get("total_risk") in INSIGHTS_HIGH_RISK]
+            if insights:
+                insights.sort(key=lambda x: -(x[3] or 0))
+                self.add("MEDIUM", "Lifecycle",
+                         "%d Red Hat Insights recommendation(s) rated "
+                         "Important or Critical are open" % len(insights),
+                         "08-active-alerts.json (%s): " % INSIGHTS_ALERT
+                         + "; ".join(
+                             "[%s] %s%s" % (
+                                 x[4].get("total_risk"),
+                                 (x[4].get("description") or "?")[:160],
+                                 (", open" + _firing_for(x[3]))
+                                 if x[3] is not None else "")
+                             for x in insights[:5])
+                         + (" ... +%d more" % (len(insights) - 5)
+                            if len(insights) > 5 else ""),
+                         "Red Hat's own analysis of this cluster flags a "
+                         "known problem (a vulnerability, a bug or a risky "
+                         "configuration) that applies to it.",
+                         "Read the recommendation in Red Hat Insights "
+                         "Advisor for this cluster (the alert links to it): "
+                         "it states what Red Hat advises, which may be an "
+                         "update or a configuration change.",
+                         assumption="The alert carries only the title and "
+                                    "risk level of the recommendation; "
+                                    "whether a pending update resolves it "
+                                    "is not visible offline.")
             warn = [x for x in firing if x[1] == "warning"]
             if warn:
                 longest = max(x[3] or 0 for x in warn)
@@ -2029,8 +2086,9 @@ class Analyzer(object):
             pass  # logging stack finding handled in check_olm via CSV version
 
     def _firing_alerts(self):
-        """[(alertname, severity, namespace, days firing or None)] from the
-        --alerts snapshot; None when it was not collected or is unreadable."""
+        """[(alertname, severity, namespace, days firing or None, labels)]
+        from the --alerts snapshot; None when it was not collected or is
+        unreadable."""
         raw = self.b.read("08-active-alerts.json")
         if not raw:
             return None
@@ -2060,7 +2118,7 @@ class Analyzer(object):
                     pass
             out.append((lab.get("alertname", "?"),
                         lab.get("severity", "none"),
-                        lab.get("namespace", ""), days))
+                        lab.get("namespace", ""), days, lab))
         return out
 
     def _pod_states(self):
@@ -3132,6 +3190,10 @@ class Analyzer(object):
                 sched = col_slice(header, line, "SCHEDULE", ("TIMEZONE",))
                 name = line.split()[1] if len(line.split()) > 1 else "?"
                 ns = line.split()[0]
+                suspended = col_slice(header, line, "SUSPEND",
+                                      ("ACTIVE",)).lower() == "true"
+                if sched.strip() == "* * * * *" and suspended:
+                    continue                # does not run at all
                 if sched.strip() == "* * * * *":
                     odd.append("%s/%s runs EVERY MINUTE" % (ns, name))
                 elif re.search(r"unseal|secret-sync|token-refresh", name):
@@ -3297,10 +3359,19 @@ class Analyzer(object):
                      "merging is required.")
         # identities whose IdP no longer exists in the spec
         # (the name: key may open a list item: "- name: x")
-        idp_names = set(re.findall(r"^\s*-?\s*name:\s*(\S+)\s*$", spec, re.M))
-        orphans = {l.split()[1] for l in self.b.lines("07-identities.txt")
-                   if len(l.split()) >= 2 and idp_names
-                   and l.split()[1] not in idp_names}
+        # an IdP name may contain spaces ("Local Users"), so neither the
+        # yaml value nor the table column can be split on whitespace
+        idp_names = {n.strip().strip("'\"") for n in re.findall(
+            r"^\s*-?\s*name:\s*(\S.*?)\s*$", spec, re.M)}
+        # an Identity is named "<idp name>:<user at the idp>", and an IdP
+        # name cannot contain ":" - so the text before the first colon is
+        # the provider, whatever spaces it holds
+        orphans = set()
+        if idp_names:
+            for l in self.b.lines("07-identities.txt"):
+                idp = l.split(":", 1)[0].strip() if ":" in l else ""
+                if idp and idp not in idp_names:
+                    orphans.add(idp)
         if orphans:
             self.add("LOW", "Hygiene",
                      "Identities from removed identity provider(s): %s"
@@ -3472,6 +3543,8 @@ class Analyzer(object):
             # platform-signer leaf certs are short-lived BY DESIGN and
             # auto-rotated - only manually managed certs deserve escalation
             issuer = tok[3] if len(tok) > 3 else ""
+            if issuer == "<none>":          # annotation absent, not a name
+                issuer = ""
             auto = bool(AUTOROTATED_ISSUER_RE.search(issuer)
                         or (not issuer and re.match(
                             r"openshift-(kube-|etcd|config-managed|"
@@ -3889,8 +3962,7 @@ def render_attention(a, bundle_name):
                     p.stat().st_size > 1024 * 1024:
                 continue
             t = p.read_text(errors="replace")
-            if re.search(r"(clientSecret|bindPassword|password|token):\s*"
-                         r"[A-Za-z0-9+/=_-]{12,}\s*$", t, re.M):
+            if any(rx.search(t) for rx in SECRET_SHAPED_RES):
                 leaks.append(p.name)
     L.append("## Confidentiality")
     L.append("")

@@ -23,7 +23,10 @@
 # Data sensitivity:
 #   This script does NOT read Secret *data*, and reads the *data* of only
 #   three platform ConfigMaps (the two monitoring configurations, saved in
-#   the bundle; the public ingress CA with --alerts, not saved). It captures:
+#   the bundle; the public ingress CA with --alerts, not saved). Two kinds of
+#   secret-shaped values that sit in ordinary config objects are redacted on
+#   the way in: the image registry httpSecret and credentials inside URLs.
+#   It captures:
 #     - user / group / service-account identities (RBAC, identities, OAuth)
 #     - internal hostnames, FQDNs and IP addresses (nodes, routes, services)
 #     - cluster ID, base domain, registry/mirror references, route inventory
@@ -60,7 +63,7 @@ for arg in "$@"; do
     --alerts) ALERTS=1 ;;
     --alerts-insecure) ALERTS=2 ;;
     -h|--help)
-      sed -n '2,43p' "$0"; exit 0 ;;
+      sed -n '2,46p' "$0"; exit 0 ;;
     -*) echo "unknown option: $arg (see --help)" >&2; exit 2 ;;
     *) CLUSTER_LABEL="$arg" ;;
   esac
@@ -87,9 +90,22 @@ warn() { printf '  [!] %s\n' "$1" >&2; }
 # run <outfile> <oc args...>  — never fails the script; records missing/denied.
 # The request timeout is a default: a --request-timeout among the arguments
 # comes later on the command line and wins.
+# Secret-shaped values also live in ordinary config objects, not only in
+# Secrets. Every collected output passes through this filter, so they never
+# reach the bundle:
+#   - spec.httpSecret of the image registry config (yaml and json form)
+#   - credentials inside a URL (proxy, remote endpoints): scheme://user:pass@host
+scrub() {
+  sed -E \
+    -e 's/^([[:space:]]*httpSecret:[[:space:]]*).*/\1REDACTED-BY-COLLECTOR/' \
+    -e 's/("httpSecret"[[:space:]]*:[[:space:]]*")[^"]*"/\1REDACTED-BY-COLLECTOR"/g' \
+    -e 's#([a-zA-Z][a-zA-Z0-9+.-]*://)[^/@:[:space:]"'"'"']+:[^/@[:space:]"'"'"']+@#\1REDACTED-BY-COLLECTOR@#g'
+}
+
 run() {
   local name="$1" f="$OUT/$1"; shift
-  if oc --request-timeout="$REQUEST_TIMEOUT" "$@" > "$f" 2>"$f.err"; then
+  # pipefail (set above) makes a failing oc fail the whole pipeline
+  if oc --request-timeout="$REQUEST_TIMEOUT" "$@" 2>"$f.err" | scrub > "$f"; then
     [ -s "$f" ] || echo "(empty result)" > "$f"
     rm -f "$f.err"
   else

@@ -1485,6 +1485,190 @@ class TestActiveAlerts(unittest.TestCase):
         self.assertEqual(oa.alerts_summary([]), "none")
 
 
+class TestFieldReviewFixes(unittest.TestCase):
+    """False positives and gaps found by reading a real bundle next to the
+    analyzer's report (2026-11)."""
+
+    def test_idp_name_with_a_space_is_not_an_orphan(self):
+        with tempfile.TemporaryDirectory() as t:
+            a = analyzer(t, {
+                "07-oauth.yaml":
+                    "spec:\n  identityProviders:\n"
+                    "  - htpasswd:\n      fileData:\n        name: htp\n"
+                    "    mappingMethod: claim\n    name: Local Users\n"
+                    "    type: HTPasswd\n",
+                "07-identities.txt":
+                    "NAME                IDP NAME      IDP USER NAME   USER NAME   USER UID\n"
+                    "Local Users:admin   Local Users   admin           admin       1\n"
+                    "Old LDAP:bob        Old LDAP      bob             bob         2\n"})
+            a.check_identity_path()
+            f = [x for x in a.findings if "removed identity" in x["title"]]
+            self.assertEqual(len(f), 1)
+            self.assertIn("Old LDAP", f[0]["title"])
+            self.assertNotIn("Users:admin", f[0]["title"])
+            self.assertNotIn("Local Users", f[0]["title"])
+
+    CSV_HEADER = "NAMESPACE NAME DISPLAY VERSION REPLACES PHASE\n"
+
+    def test_all_namespaces_operator_is_not_an_operatorgroup_remnant(self):
+        nss = ["own-ns", "left-over"] + ["ns%d" % i for i in range(5)]
+        csv = self.CSV_HEADER + "".join(
+            "%s global-op.v1 Global 1.0 - Succeeded\n" % ns for ns in nss)
+        with tempfile.TemporaryDirectory() as t:
+            a = analyzer(t, {
+                "05-csv.txt": csv,
+                "05-operatorgroup.txt": "NAMESPACE NAME AGE\n"
+                                        "own-ns og1 3d\nleft-over og2 3d\n",
+                "05-subscriptions.txt":
+                    "NS NAME CHANNEL SOURCE APPROVAL CSV\n"
+                    "own-ns global-op stable redhat-operators Automatic global-op.v1\n"})
+            a.check_olm()
+            f = next(x for x in a.findings
+                     if "OperatorGroup but no operator" in x["title"])
+            self.assertIn("left-over", f["evidence"])
+            self.assertNotIn("own-ns", f["evidence"])
+
+    SCC_HEADER = ("NAME PRIV CAPS SELINUX RUNASUSER FSGROUP SUPGROUP PRIORITY "
+                  "READONLYROOTFS VOLUMES\n")
+    NFD_SCC = ('nfd-worker false <no value> MustRunAs MustRunAsRange MustRunAs '
+               'RunAsAny <no value> false ["configMap","hostPath","secret"]\n')
+
+    def test_nfd_sccs_are_attributed_when_nfd_is_installed(self):
+        with tempfile.TemporaryDirectory() as t:
+            a = analyzer(t, {
+                "07-scc.txt": self.SCC_HEADER + self.NFD_SCC,
+                "05-csv.txt": self.CSV_HEADER +
+                    "openshift-nfd nfd.4.20.0-202611041431 NFD 4.20 - Succeeded\n"})
+            a.check_security()
+            self.assertFalse([x for x in titles(a) if "not attributable" in x])
+
+    def test_nfd_sccs_without_nfd_are_still_flagged(self):
+        with tempfile.TemporaryDirectory() as t:
+            a = analyzer(t, {"07-scc.txt": self.SCC_HEADER + self.NFD_SCC,
+                             "05-csv.txt": self.CSV_HEADER})
+            a.check_security()
+            self.assertTrue([x for x in titles(a) if "not attributable" in x])
+
+    CRON_HEADER = ("NAMESPACE   NAME      SCHEDULE      TIMEZONE   SUSPEND   "
+                   "ACTIVE   LAST SCHEDULE   AGE\n")
+
+    def test_suspended_every_minute_cronjob_is_ignored(self):
+        with tempfile.TemporaryDirectory() as t:
+            a = analyzer(t, {"10-cronjobs.txt": self.CRON_HEADER +
+                "plat        cleanup   * * * * *     <none>     True      "
+                "0        31d             31d\n"})
+            a.check_naming_hygiene()
+            self.assertFalse([x for x in titles(a) if "CronJob" in x])
+
+    def test_running_every_minute_cronjob_is_still_flagged(self):
+        with tempfile.TemporaryDirectory() as t:
+            a = analyzer(t, {"10-cronjobs.txt": self.CRON_HEADER +
+                "plat        cleanup   * * * * *     <none>     False     "
+                "0        31s             31d\n"})
+            a.check_naming_hygiene()
+            self.assertTrue([x for x in titles(a) if "CronJob" in x])
+
+    def test_platform_cert_with_none_issuer_counts_as_auto_rotated(self):
+        d = Path(tempfile.mkdtemp()) / "ocp-review_lab_20261122-040112"
+        d.mkdir()
+        (d / "07-cert-expiry.txt").write_text(
+            "NS NAME NOT-AFTER ISSUER\n"
+            "openshift-oauth-apiserver openshift-authenticator-certs "
+            "2026-12-06T03:02:11Z <none>\n"
+            "my-app custom-cert 2026-12-06T03:02:11Z <none>\n")
+        a = oa.Analyzer(oa.Bundle(d))
+        a.check_cert_expiry()
+        auto = next(f for f in a.findings if "auto-rotated" in f["title"])
+        self.assertIn("openshift-authenticator-certs", auto["evidence"])
+        manual = next(f for f in a.findings if "expiring within" in f["title"])
+        self.assertIn("custom-cert", manual["evidence"])
+        self.assertNotIn("openshift-authenticator-certs", manual["evidence"])
+
+    MON_CM = ("apiVersion: v1\ndata:\n  config.yaml: |\n"
+              "    enableUserWorkload: true\nkind: ConfigMap\n")
+    PVC_HEADER = "NAMESPACE NAME STATUS VOLUME CAPACITY\n"
+
+    def test_ephemeral_monitoring_is_reported_when_the_configmap_exists(self):
+        with tempfile.TemporaryDirectory() as t:
+            a = analyzer(t, {"08-cluster-monitoring.yaml": self.MON_CM,
+                             "04-pvc.txt": self.PVC_HEADER +
+                                           "app data Bound pv1 1Gi\n"})
+            a.check_monitoring()
+            f = next(x for x in a.findings
+                     if x["title"] == "Monitoring stack runs on ephemeral storage")
+            self.assertIn("no volumeClaimTemplate", f["evidence"])
+
+    def test_persistent_monitoring_is_not_reported(self):
+        cases = [
+            {"08-cluster-monitoring.yaml": self.MON_CM,
+             "04-pvc.txt": self.PVC_HEADER +
+                 "openshift-monitoring prometheus-k8s-db-0 Bound pv1 40Gi\n"},
+            {"08-cluster-monitoring.yaml": self.MON_CM +
+                 "#     volumeClaimTemplate:\n",
+             "04-pvc.txt": self.PVC_HEADER + "app data Bound pv1 1Gi\n"},
+        ]
+        for files in cases:
+            with tempfile.TemporaryDirectory() as t:
+                a = analyzer(t, files)
+                a.check_monitoring()
+                self.assertFalse([x for x in titles(a) if "ephemeral" in x])
+
+    @staticmethod
+    def insights(risk, starts="2026-11-05T17:40:00Z"):
+        return {"labels": {"alertname": "InsightsRecommendationActive",
+                           "severity": "info", "namespace": "openshift-insights",
+                           "total_risk": risk,
+                           "description": "CVE-0000-0000: example problem"},
+                "status": {"state": "active"}, "startsAt": starts}
+
+    def run_alerts(self, alerts):
+        d = Path(tempfile.mkdtemp()) / "ocp-review_lab_20261122-040112"
+        d.mkdir()
+        (d / "08-active-alerts.json").write_text(json.dumps(alerts))
+        a = oa.Analyzer(oa.Bundle(d))
+        a.check_monitoring()
+        return a
+
+    def test_important_insights_recommendation_is_a_finding(self):
+        a = self.run_alerts([self.insights("Important"), self.insights("Low")])
+        f = next(x for x in a.findings if "Insights recommendation" in x["title"])
+        self.assertEqual(f["sev"], "MEDIUM")
+        self.assertTrue(f["title"].startswith("1 Red Hat Insights"))
+        self.assertIn("[Important] CVE-0000-0000: example problem", f["evidence"])
+        self.assertIn("for ~16 days", f["evidence"])
+        self.assertNotIn("console.redhat.com", f["evidence"])   # no cluster id
+
+    def test_low_risk_insights_recommendation_stays_in_the_overview(self):
+        a = self.run_alerts([self.insights("Moderate"), self.insights("Low")])
+        self.assertFalse([x for x in titles(a) if "Insights" in x])
+
+    def test_secret_scan_flags_registry_secret_and_url_credentials(self):
+        cases = {
+            "07-imageregistry.yaml": "spec:\n  httpSecret: a5aa1b40304e57a780eb90b2\n",
+            "01-proxy.yaml": "spec:\n  httpProxy: http://svc:Pa55w0rd@proxy.corp:3128\n",
+        }
+        for name, content in cases.items():
+            with tempfile.TemporaryDirectory() as t:
+                a = analyzer(t, {name: content})
+                a.run()
+                self.assertIn("Possible secret material in:** " + name,
+                              oa.render_attention(a, "b"))
+
+    def test_secret_scan_ignores_redacted_and_harmless_values(self):
+        with tempfile.TemporaryDirectory() as t:
+            a = analyzer(t, {
+                "07-imageregistry.yaml":
+                    "spec:\n  httpSecret: REDACTED-BY-COLLECTOR\n",
+                "01-proxy.yaml":
+                    "spec:\n  httpProxy: http://REDACTED-BY-COLLECTOR@p.corp:3128\n"
+                    "  noProxy: http://[::1]/callback\n",
+                "03-routes.txt": "NAME HOST\nr https://console.apps.x/a\n"
+                                 "img quay.io/a/b@sha256:abc\n"})
+            a.run()
+            self.assertNotIn("Possible secret material",
+                             oa.render_attention(a, "b"))
+
+
 class TestOvnkubeCoverage(unittest.TestCase):
     NODES = ("NAME    STATUS   ROLES    AGE   VERSION\n"
              "node-a  Ready    worker   9d    v1.33.1\n"
@@ -1659,6 +1843,34 @@ class TestCollectorScript(unittest.TestCase):
     def test_every_call_has_a_request_timeout(self):
         self.assertIn('oc --request-timeout="$REQUEST_TIMEOUT" "$@"',
                       self.SCRIPT)
+
+    def test_every_collected_output_passes_the_secret_filter(self):
+        self.assertIn('"$@" 2>"$f.err" | scrub > "$f"', self.SCRIPT)
+        self.assertIn("set -uo pipefail", self.SCRIPT)   # oc failure survives the pipe
+        m = re.search(r"^scrub\(\) \{\n(.*?)^\}", self.SCRIPT, re.M | re.S)
+        self.assertIsNotNone(m)
+        import shutil
+        import subprocess
+        if not shutil.which("bash"):
+            self.skipTest("bash not available")
+        sample = ("spec:\n  httpSecret: a5aa1b40304e57a780\n"
+                  '{"spec":{"httpSecret":"deadbeef0011","x":1}}\n'
+                  "  httpProxy: http://svc:Pa55w0rd@proxy.corp:3128\n"
+                  "  url: https://console.example/x\n"
+                  "  cb: http://[::1]/callback\n"
+                  "  image: quay.io/a/b@sha256:abc\n"
+                  "NAME   READY\npod-a  1/1\n")
+        out = subprocess.run(["bash", "-c", "scrub() {\n%s}\nscrub" % m.group(1)],
+                             input=sample, capture_output=True, text=True,
+                             check=True).stdout
+        for secret in ("a5aa1b40", "deadbeef0011", "Pa55w0rd", "svc:"):
+            self.assertNotIn(secret, out)
+        self.assertIn("httpSecret: REDACTED-BY-COLLECTOR", out)
+        self.assertIn('"httpSecret":"REDACTED-BY-COLLECTOR","x":1', out)
+        self.assertIn("http://REDACTED-BY-COLLECTOR@proxy.corp:3128", out)
+        for kept in ("https://console.example/x", "http://[::1]/callback",
+                     "quay.io/a/b@sha256:abc", "pod-a  1/1"):
+            self.assertIn(kept, out)
 
     def test_collision_prone_resources_are_fully_qualified(self):
         c = self.collected()

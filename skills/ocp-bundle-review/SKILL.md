@@ -135,6 +135,11 @@ Work through ALL of these; each cites the file to check.
   how long each has been firing (weeks = nobody is watching); ignore the
   always-on `Watchdog`. `AlertmanagerReceiversNotConfigured` firing with no
   forwarding = the cluster itself confirms no notification is delivered.
+  `InsightsRecommendationActive` is info-level whatever its risk: read its
+  `total_risk` label (Important/Critical = a finding).
+- No PVCs in `openshift-monitoring` (`04-pvc.txt`) and no
+  `volumeClaimTemplate` in the config = metrics and silences on temporary
+  storage.
 - `08-clusterlogging.yaml`:
   stack version, storage class, forwarder targets.
 
@@ -227,6 +232,9 @@ accordingly:
   `.err` means unknown, not "no".
 - Data is point-in-time: state the collection date; recommend a fresh run if
   the review is presented much later.
+- Grep the bundle for secret-shaped values (`httpSecret:`, `password:`,
+  `://user:pass@`) and report any hit in the attention points - bundles from
+  collectors before 2026.11.2 carry the image registry `httpSecret`.
 - The bundle contains real usernames, hostnames, and the full route
   inventory — treat outputs as confidential; suggest `sanitize-ocp-bundle.py`
   before sharing beyond the account team.

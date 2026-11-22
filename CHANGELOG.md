@@ -4,6 +4,27 @@ All notable changes to this toolkit are recorded here. Dates are ISO (YYYY-MM-DD
 
 ## [Unreleased]
 
+### Fixed
+
+- Collector saved one real secret: the image registry's `httpSecret` (from
+  its config object, not a Secret). Every collected output now passes a
+  filter that redacts it, and credentials inside URLs (`user:pass@host`,
+  e.g. a proxy). The sanitizer redacts both in older bundles, and the
+  analyzer's attention points flag bundles that still carry them.
+- Analyzer false positives found by a field review: identity providers
+  whose name contains a space reported as removed; operators installed for
+  all namespaces reported as OperatorGroup remnants; NFD's SCCs not
+  attributed to the installed operator; suspended CronJobs flagged for
+  their schedule; a platform-rotated certificate rated HIGH because its
+  issuer annotation is absent.
+
+### Added
+
+- Analyzer: monitoring on ephemeral storage is reported also when the
+  monitoring ConfigMap exists but sets no storage; Red Hat Insights
+  recommendations rated Important or Critical become a finding (they arrive
+  as an info-level alert).
+
 ## [2026.11.1] - 2026-11-22
 
 The firing-alerts snapshot now works from a bastion and is actually used by

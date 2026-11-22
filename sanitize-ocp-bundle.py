@@ -22,6 +22,8 @@ What gets replaced (consistently across all files):
   * non-ASCII runs (e.g. Hebrew full names)     -> REDACTED-NAME
   * OAuth client secrets (oauthclients table
     SECRET column and yaml secret: fields)      -> REDACTED-OAUTH-SECRET
+  * the image registry httpSecret and
+    credentials inside URLs (user:pass@host)    -> REDACTED-SECRET
     (irreversible: secrets are never written to the map file)
   * any extra strings given with --replace
 
@@ -49,6 +51,11 @@ DN_RE = re.compile(r"\b(CN|OU|DC)=([^,\"'\n{}]+)", re.IGNORECASE)
 # `secret: <value>` on one line, as in OAuthClient yaml. Does not match the
 # `clientSecret:` name reference in oauth.yaml (value is on the next line).
 SECRET_LINE_RE = re.compile(r"^(\s*(?:secret|clientSecret):\s*)(\S+)\s*$", re.MULTILINE)
+# Secret-shaped values in ordinary config objects (bundles from collectors
+# before 2026.11.2 carry them; newer collectors redact them at the source):
+# the image registry httpSecret (yaml and json form) and URL credentials.
+HTTP_SECRET_RE = re.compile(r"""(httpSecret"?\s*:\s*"?)[^\s"]+""")
+URL_CRED_RE = re.compile(r"""([a-zA-Z][a-zA-Z0-9+.-]*://)[^/@:\s"']+:[^/@\s"']+@""")
 
 
 def detect_domains(bundle: Path):
@@ -300,6 +307,10 @@ def main():
     pseudo = Pseudonymizer()
 
     def sanitize_text(text: str) -> str:
+        # secrets first: a password inside a URL must go before the e-mail
+        # rule can mistake "pass@host" for an address and keep part of it
+        text = HTTP_SECRET_RE.sub(lambda m: m.group(1) + "REDACTED-SECRET", text)
+        text = URL_CRED_RE.sub(lambda m: m.group(1) + "REDACTED-SECRET@", text)
         # bounded (usernames/nodes) first — an unbounded hit inside a username
         # (e.g. cluster name inside "<cluster>admin") would break the match
         if bnd_re:

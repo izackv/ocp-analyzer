@@ -336,6 +336,12 @@ as a self-check that the tools work there.
   (saved in the bundle - review them before sharing, they can name external
   endpoints) and, with `--alerts`, the public ingress CA certificate (not
   saved). No application ConfigMap is read.
+- Secret-shaped values can also sit in ordinary config objects. The
+  collector redacts the two it knows about on the way in - the image
+  registry `httpSecret` and credentials inside URLs (`user:pass@host`) - and
+  the analyzer's attention points flag secret-shaped content it finds in a
+  bundle. Bundles collected before 2026.11.2 carry the registry secret in
+  `07-imageregistry.yaml`: run the sanitizer on them before sharing.
 - Bundles still contain sensitive metadata: usernames, hostnames, IPs, the
   full application route inventory. Treat every bundle as confidential;
   sanitize before any external sharing.

@@ -221,6 +221,32 @@ class SanitizerOptionsTest(unittest.TestCase):
         self.assertIn("secret: REDACTED-OAUTH-SECRET", out)
         self.assertIn("name: openid-client-secret", out)
 
+    def test_registry_http_secret_and_url_credentials_redacted(self):
+        """Bundles from collectors before 2026.11.2 carry these in clear."""
+        (self.bundle / "07-imageregistry.yaml").write_text(
+            "spec:\n  httpSecret: a5aa1b40304e57a780eb90b2b23d51aa\n"
+            "  managementState: Managed\n")
+        (self.bundle / "01-proxy.yaml").write_text(
+            "spec:\n  httpProxy: http://svc-user:Pa55w0rd@proxy.corp:3128\n"
+            "  cb: http://[::1]/callback\n")
+        outdir = self.tmp / "out"
+        res = run_sanitizer(self.bundle, outdir)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        reg = (outdir / "07-imageregistry.yaml").read_text()
+        self.assertNotIn("a5aa1b40", reg)
+        self.assertIn("httpSecret: REDACTED-SECRET", reg)
+        self.assertIn("managementState: Managed", reg)
+        proxy = (outdir / "01-proxy.yaml").read_text()
+        self.assertNotIn("Pa55w0rd", proxy)
+        self.assertNotIn("svc-user", proxy)
+        # the e-mail rule may then rewrite "REDACTED-SECRET@host" further;
+        # what matters is that the credentials are gone and the URL remains
+        self.assertRegex(proxy, r"httpProxy: http://\S+:3128")
+        self.assertIn("http://[::1]/callback", proxy)
+        for f in self.tmp.glob("*map*.json"):
+            self.assertNotIn("a5aa1b40", f.read_text())
+            self.assertNotIn("Pa55w0rd", f.read_text())
+
     def test_rhoai_encoded_usernames_in_workbench_names(self):
         """OpenShift AI embeds the username, hex-escaped, in workbench names
         (13-rhoai-notebooks.txt) and from there in pods, PVCs and Kueue
